@@ -142,6 +142,25 @@
       for(const day of dates){ if(s && day < s) continue; if(e && day > e) continue; const row = data?.[day] || {}; for(const emp of employees){ const v = row[emp]||''; if(!v || v==='休') continue; counter[emp]['总']++; if(SHIFT_WORK_TYPES.includes(v)) counter[emp][v]++; } }
       return counter;
     }
+    function countByEmpOnDates(employees, data, dates){
+      const counter = {};
+      let hasWork = false;
+      for(const emp of employees){
+        counter[emp] = { 总:0 };
+        for(const shift of SHIFT_WORK_TYPES){ counter[emp][shift] = 0; }
+      }
+      for(const day of dates){
+        const row = data?.[day] || {};
+        for(const emp of employees){
+          const v = row[emp] || '';
+          if(!v || v === '休') continue;
+          counter[emp]['总']++;
+          if(SHIFT_WORK_TYPES.includes(v)) counter[emp][v]++;
+          hasWork = true;
+        }
+      }
+      return { counter, hasWork };
+    }
 
     function countRunLeft(data, d, e){ let c=0; for(let i=-1;i>=-10;i--){ const ymd=dateAdd(d,i); const v=getVal(data, ymd, e); if(isWork(v)) c++; else break; } return c; }
     function countRunRight(data, d, e){ let c=0; for(let i=1;i<=10;i++){ const ymd=dateAdd(d,i); const v=getVal(data, ymd, e); if(isWork(v)) c++; else break; } return c; }
@@ -760,6 +779,14 @@
       const [albumAutoNote, setAlbumAutoNote] = useState('');
       const [albumHistory, setAlbumHistory] = useState([]);
       const [accountPasswordDrafts, setAccountPasswordDrafts] = useState({});
+      const importInputRef = useRef(null);
+      const [importing, setImporting] = useState(false);
+
+      useEffect(()=>{
+        if(viewManuallyAdjustedRef.current) return;
+        setViewStart(planStart);
+        setViewEnd(planEnd);
+      }, [planStart, planEnd]);
 
       useEffect(()=>{
         if(viewManuallyAdjustedRef.current) return;
@@ -1376,6 +1403,66 @@
       }, [autoLoadKey, team, user]);
       async function doLogout(){ try{ await apiPost('/logout',{}); setUser(null);}catch{} }
       function exportExcel(){ const url = `${API_BASE}/export/xlsx?team=${encodeURIComponent(team)}&start=${planStart}&end=${planEnd}`; window.location.href=url; }
+      function downloadTemplate(){ window.location.href = `${API_BASE}/template/xlsx`; }
+      function openImportPicker(){ if(editingLocked) return; if(importInputRef.current){ importInputRef.current.click(); } }
+      async function importScheduleFile(file){
+        if(!file) return;
+        setImporting(true);
+        try{
+          const formData = new FormData();
+          formData.append('file', file);
+          const res = await fetch(`${API_BASE}/import/xlsx`, {
+            method: 'POST',
+            body: formData,
+            credentials: 'include'
+          });
+          if(!res.ok){
+            let msg = '导入失败';
+            try {
+              const err = await res.json();
+              if(err && err.message) msg = err.message;
+            } catch{}
+            throw new Error(msg);
+          }
+          const payload = await res.json();
+          const importedEmployees = Array.isArray(payload?.employees) ? payload.employees : [];
+          const importedData = (payload && typeof payload.data === 'object' && !Array.isArray(payload.data)) ? payload.data : {};
+          const start = typeof payload?.start === 'string' ? payload.start.slice(0,10) : '';
+          const end = typeof payload?.end === 'string' ? payload.end.slice(0,10) : '';
+          if(importedEmployees.length){
+            setEmployees(importedEmployees);
+          }
+          setData(importedData);
+          setVersionId(null);
+          setBatchChecked({});
+          setAlbumSelected({});
+          if(start){
+            setPlanStart(start);
+          }
+          if(end){
+            setPlanEnd(end);
+          }
+          if(start || end){
+            viewManuallyAdjustedRef.current = false;
+            if(start) setViewStart(start);
+            if(end) setViewEnd(end);
+          }
+          showToast(payload?.message || '导入成功，已覆盖当前排班', 'success');
+        } catch(e){
+          alert(e.message || '导入失败');
+        } finally {
+          setImporting(false);
+          if(importInputRef.current){ importInputRef.current.value = ''; }
+        }
+      }
+      const onImportInputChange = (e)=>{
+        const file = e.target?.files?.[0];
+        if(!file){
+          if(importInputRef.current){ importInputRef.current.value = ''; }
+          return;
+        }
+        importScheduleFile(file);
+      };
 
       useEffect(()=>{
         if(tab === 'history'){
@@ -1436,19 +1523,33 @@
         if(!day || !emp) return null;
         const parse = (ymd)=> new Date(`${ymd}T00:00:00`);
         const timeline = planDateList.length ? planDateList : allDateKeys;
-        const planIndex = timeline.indexOf(day);
         const computeGap = (targetShift)=>{
-          const source = planIndex === -1 ? allDateKeys : timeline;
-          const startIndex = planIndex === -1 ? allDateKeys.indexOf(day) : planIndex;
-          if(startIndex <= 0) return null;
-          for(let idx = startIndex - 1; idx >= 0; idx--){
-            const prevDay = source[idx];
-            if(!prevDay) break;
-            const val = getVal(data, prevDay, emp);
-            if(val === targetShift){
-              const diff = Math.round((parse(day) - parse(prevDay)) / 86400000);
-              return Number.isFinite(diff) ? diff : null;
+          const search = (source)=>{
+            if(!source.length) return null;
+            const anchorIdx = source.indexOf(day);
+            const walk = (startIdx, skipSameDay)=>{
+              for(let idx = startIdx; idx >= 0; idx--){
+                const prevDay = source[idx];
+                if(!prevDay) continue;
+                if(skipSameDay && prevDay >= day) continue;
+                const val = getVal(data, prevDay, emp);
+                if(val === targetShift){
+                  const diff = Math.round((parse(day) - parse(prevDay)) / 86400000);
+                  return Number.isFinite(diff) ? diff : null;
+                }
+              }
+              return null;
+            };
+            if(anchorIdx !== -1){
+              return walk(anchorIdx - 1, false);
             }
+            return walk(source.length - 1, true);
+          };
+          const primary = search(timeline);
+          if(primary !== null) return primary;
+          if(planDateList.length){
+            const fallback = search(allDateKeys);
+            if(fallback !== null) return fallback;
           }
           return null;
         };
@@ -1460,7 +1561,16 @@
         };
         }, [picker, dateList, employees, data, planDateList, allDateKeys]);
 
-      const gridEmpCounts = useMemo(()=> countByEmpInRange(employees, data, planStart, planEnd), [employees, data, planStart, planEnd]);
+      const gridEmpCounts = useMemo(()=>{
+        const usingPlan = planDateList.length > 0;
+        const primaryDates = usingPlan ? planDateList : allDateKeys;
+        const primary = countByEmpOnDates(employees, data, primaryDates);
+        if(primary.hasWork || !usingPlan){
+          return primary.counter;
+        }
+        const fallback = countByEmpOnDates(employees, data, allDateKeys);
+        return fallback.hasWork ? fallback.counter : primary.counter;
+      }, [employees, data, planDateList, allDateKeys]);
 
       const viewYear = useMemo(()=>{
         const base = viewStart || planStart || dateList[0];
@@ -2947,7 +3057,14 @@
             <div className="flex flex-wrap items-end gap-2">
               <PillBtn onClick={saveToServer} color="emerald" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存新版本</PillBtn>
               <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>服务器导出 Excel/CSV</PillBtn>
+              <PillBtn onClick={downloadTemplate} color="gray">下载导入模板</PillBtn>
+              <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?'执行中：只读':(importing?'导入中…':'')}>
+                {importing ? (<><Spinner className="w-4 h-4 text-white" /> 导入中…</>) : '导入 Excel' }
+              </PillBtn>
+              <input type="file" ref={importInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={onImportInputChange} />
             </div>
+          </div>
+          <div className="mt-2 text-xs text-gray-500">导入支持 XLSX / XLS / CSV 格式，将覆盖当前排班并自动更新周期。</div>
           </div>
           <div className="mt-6">
             <h3 className="font-semibold mb-2">自动排班优化</h3>
