@@ -426,15 +426,28 @@
         setTimeout(resolve, 16);
       }
     });
-      const MenuButton = ({active, icon, children, onClick}) => (
-      <button onClick={onClick} className={`relative w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 ${active? 'bg-indigo-50 text-indigo-700 side-active' : 'hover:bg-gray-100 text-gray-700'} `}>
-        <Icon name={icon} className={active? 'text-indigo-600' : 'text-gray-500'} />
-        <span className="text-sm font-medium">{children}</span>
+    const MenuButton = ({ active, icon, children, onClick }) => (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`group relative w-full flex items-center gap-3 rounded-2xl border transition-all duration-200 ${active
+          ? 'border-transparent bg-gradient-to-r from-indigo-500 via-sky-500 to-cyan-500 text-white shadow-lg shadow-indigo-200/60'
+          : 'border-transparent bg-white/70 text-gray-600 hover:border-indigo-100 hover:bg-white hover:shadow-md'}`}
+      >
+        <span className={`flex h-9 w-9 items-center justify-center rounded-xl transition-colors ${active
+          ? 'bg-white/20 text-white'
+          : 'bg-indigo-50 text-indigo-500 group-hover:bg-indigo-100 group-hover:text-indigo-600'}`}>
+          <Icon name={icon} />
+        </span>
+        <span className="text-sm font-medium tracking-wide">{children}</span>
+        {active && <span className="ml-auto h-2 w-2 rounded-full bg-white/80 shadow"></span>}
       </button>
     );
 
     function SideDock({tab,setTab, menuPerms}){
-      const [open,setOpen]=useState(false);
+      const [open, setOpen] = useState(false);
+      const [hovering, setHovering] = useState(false);
+      const expanded = open || hovering;
       const items = [
         { key:'grid', icon:'grid', label:'排班表格' },
         { key:'batch', icon:'magic', label:'自动分配班次' },
@@ -446,15 +459,26 @@
         { key:'roles', icon:'lock', label:'角色设置' }
       ];
       return (
-        <div className={`dock fixed left-0 top-16 bottom-6 w-11 z-40 flex items-center`} onMouseEnter={()=>setOpen(true)} onMouseLeave={()=>setOpen(false)}>
-          <div className={`dock-panel absolute left-2 top-0 bottom-0 w-60 transform transition-transform duration-200 ${open? 'translate-x-0':'-translate-x-[115%]'} bg-white rounded-xl shadow p-2 border`}>
+        <div
+          className="dock fixed left-4 top-28 bottom-12 z-40 flex items-center"
+          onMouseEnter={()=> setHovering(true)}
+          onMouseLeave={()=> setHovering(false)}
+        >
+          <div
+            className={`dock-panel absolute left-0 top-0 bottom-0 w-64 transform transition-all duration-300 ${expanded ? 'translate-x-0 opacity-100' : '-translate-x-[120%] opacity-0 pointer-events-none'} bg-white/90 backdrop-blur-xl rounded-3xl border border-indigo-100 shadow-2xl shadow-indigo-100/50 p-3 space-y-2`}
+          >
             {items.filter(item=> menuPerms?.[item.key]?.visible).map(item=> (
               <MenuButton key={item.key} active={tab===item.key} icon={item.icon} onClick={()=>setTab(item.key)}>{item.label}</MenuButton>
             ))}
           </div>
-          <div className="dock-tab absolute right-[-12px] top-1/2 -translate-y-1/2 w-6 h-18 rounded-r-lg flex items-center justify-center bg-white text-gray-700 cursor-pointer shadow" onClick={()=>setOpen(v=>!v)}>
-            <svg viewBox="0 0 20 20" className="w-4 h-4"><path d="M12 4l-6 6 6 6" fill="none" stroke="currentColor" strokeWidth="2"/></svg>
-          </div>
+          <button
+            type="button"
+            className={`dock-tab relative ml-3 flex h-12 w-12 items-center justify-center rounded-full border text-indigo-500 shadow-lg transition-all duration-300 ${expanded ? 'border-indigo-200 bg-white/90 shadow-indigo-200/70' : 'border-indigo-100 bg-white/80 hover:bg-white'}`}
+            onClick={()=> setOpen(v=> !v)}
+          >
+            <span className="sr-only">{expanded ? '收起导航' : '展开导航'}</span>
+            <svg viewBox="0 0 20 20" className={`h-5 w-5 transition-transform ${expanded ? 'rotate-180' : ''}`}><path d="M12.5 4.5l-5 5.5 5 5.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </button>
         </div>
       );
     }
@@ -1384,7 +1408,76 @@
         return ()=> document.removeEventListener('mousedown', onDocDown);
       }, [picker.open]);
 
+      const pickerContext = useMemo(()=>{
+        if(!picker.open) return null;
+        const { di, ei } = picker;
+        const day = dateList[di];
+        const emp = employees[ei];
+        if(!day || !emp) return null;
+        const parse = (ymd)=> new Date(`${ymd}T00:00:00`);
+        const computeGap = (targetShift)=>{
+          for(let idx = di - 1; idx >= 0; idx--){
+            const prevDay = dateList[idx];
+            if(!prevDay) break;
+            const val = getVal(data, prevDay, emp);
+            if(val === targetShift){
+              const diff = Math.round((parse(day) - parse(prevDay)) / 86400000);
+              return Number.isFinite(diff) ? diff : null;
+            }
+          }
+          return null;
+        };
+        return {
+          day,
+          emp,
+          nightGap: computeGap('夜'),
+          mid2Gap: computeGap('中2')
+        };
+      }, [picker, dateList, employees, data]);
+
       const gridEmpCounts = useMemo(()=> countByEmpInRange(employees, data, planStart, planEnd), [employees, data, planStart, planEnd]);
+
+      const viewYear = useMemo(()=>{
+        const base = viewStart || planStart || dateList[0];
+        if(!base) return null;
+        const d = new Date(`${base}T00:00:00`);
+        if(Number.isNaN(d.getTime())) return null;
+        return d.getFullYear();
+      }, [viewStart, planStart, dateList]);
+
+      const empYearStats = useMemo(()=>{
+        if(!viewYear) return {};
+        const start = fmt(new Date(viewYear, 0, 1));
+        const end = fmt(new Date(viewYear, 11, 31));
+        const empSet = new Set(employees);
+        const monthMap = {};
+        Object.entries(data || {}).forEach(([day, row])=>{
+          if(!row) return;
+          if(day < start || day > end) return;
+          const monthKey = day.slice(0,7);
+          Object.entries(row).forEach(([emp, val])=>{
+            if(!empSet.has(emp)) return;
+            if(!isWork(val)) return;
+            if(!monthMap[emp]) monthMap[emp] = new Set();
+            monthMap[emp].add(monthKey);
+          });
+        });
+        const result = {};
+        employees.forEach(emp=>{
+          const stats = statsForEmployee(data, emp, start, end);
+          const monthCount = monthMap[emp]?.size || 0;
+          const divisor = monthCount || 12;
+          result[emp] = {
+            year: viewYear,
+            night: stats.night,
+            mid2: stats.mid2,
+            avgNight: divisor ? stats.night / divisor : 0,
+            avgMid2: divisor ? stats.mid2 / divisor : 0,
+            months: monthCount
+          };
+        });
+        return result;
+      }, [viewYear, employees, data]);
 
       const ViewGrid = (
         <Section title="排班表格" right={<span className="text-sm text-gray-500">提示：点击单元格→直接输入或从 Excel 粘贴；支持 IME 连续输入 {editingLocked && <span className='inline-flex items-center gap-1 text-rose-600 ml-2'><Icon name='lock'/>执行中：只读</span>}</span>}>
@@ -1402,11 +1495,25 @@
                       {employees.map(e=> {
                         const diff = (gridEmpCounts[e]?.总||0) - Number(adminDays||0);
                         const diffCls = diff===0? 'bg-gray-100 text-gray-700' : (diff>0? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700');
+                        const tooltip = empYearStats[e];
                         return (
                           <th key={e} className="sticky py-2 px-3 text-left">
-                            <div className="flex items-center gap-2">
-                              <span>{e}</span>
+                            <div className="group relative inline-flex items-center gap-2">
+                              <span className="cursor-help font-medium text-gray-700">{e}</span>
                               <span className={`badge ${diffCls}`} title="差值=实际总天数-行政班应上天数">{diff>0?`+${diff}`:diff}</span>
+                              {tooltip && (
+                                <div className="pointer-events-none absolute left-0 top-full z-30 mt-2 hidden min-w-[220px] max-w-xs rounded-2xl bg-gray-900/95 p-3 text-left text-xs text-white shadow-2xl group-hover:block">
+                                  <div className="text-sm font-semibold text-white/90">{tooltip.year} 年排班</div>
+                                  <div className="mt-1 space-y-1">
+                                    <div className="flex items-center justify-between"><span>夜班总计</span><span>{tooltip.night} 天</span></div>
+                                    <div className="flex items-center justify-between"><span>中2 总计</span><span>{tooltip.mid2} 天</span></div>
+                                    <div className="h-px bg-white/10"></div>
+                                    <div className="flex items-center justify-between"><span>夜班月均</span><span>{tooltip.avgNight.toFixed(1)} 天</span></div>
+                                    <div className="flex items-center justify-between"><span>中2 月均</span><span>{tooltip.avgMid2.toFixed(1)} 天</span></div>
+                                  </div>
+                                  <div className="mt-1 text-[10px] text-white/50">{tooltip.months>0 ? `基于 ${tooltip.months} 个月排班记录统计` : '暂无该年度排班记录'}</div>
+                                </div>
+                              )}
                             </div>
                           </th>
                         );
@@ -3069,9 +3176,30 @@
           {picker.open && (
             <div className="fixed z-50" style={{ left: picker.x, top: picker.y }}>
               <div ref={pickerRef} className="picker bg-white border rounded-xl p-1 w-40">
-                {SHIFT_TYPES.map(s=> (
-                  <button key={s} className="w-full text-left px-3 py-2 rounded hover:bg-gray-100" onClick={()=>{ setCellByIndex(picker.di, picker.ei, s); setPicker(p=>({...p, open:false})); }}>{s}</button>
-                ))}
+                {SHIFT_TYPES.map(s=> {
+                  let helper = '';
+                  if(s === '夜'){
+                    if(!pickerContext) helper = '';
+                    else if(pickerContext.nightGap == null) helper = '距上次夜班：暂无记录';
+                    else helper = `距上次夜班：${pickerContext.nightGap} 天`;
+                  } else if(s === '中2'){
+                    if(!pickerContext) helper = '';
+                    else if(pickerContext.mid2Gap == null) helper = '距上次中2：暂无记录';
+                    else helper = `距上次中2：${pickerContext.mid2Gap} 天`;
+                  }
+                  return (
+                    <button
+                      key={s}
+                      className="w-full text-left px-3 py-2 rounded hover:bg-gray-100"
+                      onClick={()=>{ setCellByIndex(picker.di, picker.ei, s); setPicker(p=>({...p, open:false})); }}
+                    >
+                      <div className="flex flex-col text-sm">
+                        <span className="font-medium text-gray-700">{s}</span>
+                        {helper && <span className="text-[11px] text-gray-500 mt-0.5">{helper}</span>}
+                      </div>
+                    </button>
+                  );
+                })}
                 <div className="h-px bg-gray-100 my-1"></div>
                 <button className="w-full text-left px-3 py-2 rounded hover:bg-gray-100" onClick={()=>{ setCellByIndex(picker.di, picker.ei, ''); setPicker(p=>({...p, open:false})); }}>清空</button>
               </div>
