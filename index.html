@@ -788,12 +788,6 @@
         setViewEnd(planEnd);
       }, [planStart, planEnd]);
 
-      useEffect(()=>{
-        if(viewManuallyAdjustedRef.current) return;
-        setViewStart(planStart);
-        setViewEnd(planEnd);
-      }, [planStart, planEnd]);
-
       const [shiftColors, setShiftColors] = useState({ ...defaultShiftColors });
       const [staffingAlerts, setStaffingAlerts] = useState(()=> normalizeStaffingAlerts());
       const [adminDays, setAdminDays] = useState(0);
@@ -3065,7 +3059,6 @@
             </div>
           </div>
           <div className="mt-2 text-xs text-gray-500">导入支持 XLSX / XLS / CSV 格式，将覆盖当前排班并自动更新周期。</div>
-          </div>
           <div className="mt-6">
             <h3 className="font-semibold mb-2">自动排班优化</h3>
             <label className={`flex items-start gap-3 text-sm ${editingLocked?'opacity-60':''}`}>
