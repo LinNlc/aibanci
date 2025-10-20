@@ -1,37 +1,66 @@
-# 排班助手代码概览
+# 排班助手（测试版）
 
-## 项目结构
-- `index.html`：使用 React + TailwindCSS 构建的单页应用，内联脚本负责数据建模、界面交互、本地存储以及与后端 API 的通信。
-- `auto-scheduler.js`：封装所有自动化排班算法与通用排班工具，并挂载在 `window.AutoScheduler` 上，供页面和外部脚本调用。
-- `ai-propose.js`：为排班页面注入 AI 调度辅助按钮，可读取页面状态或解析排班表格并向 `/api/ai_propose.php` 请求建议方案。
-- `ai_propose.php`：后端示例接口，转发 AI 调整排班的请求。
+一个包含完整前端排班工作台、可插拔自动化排班算法以及简易 API 示例的演示项目。所有资源可直接静态托管，同时配合 PHP 内置服务即可体验完整的持久化交互链路。
 
-## 运行方式
-1. 直接在浏览器中打开 `index.html` 即可体验前端功能。
-2. 页面启动时会尝试访问 `/api` 下的接口；若本地无后端，可自行模拟或关闭相关入口。
-3. 自动排班逻辑由 `auto-scheduler.js` 预先加载，并在主脚本运行前通过 `Babel` 转译。主脚本会在初始化时校验 `window.AutoScheduler` 是否存在。
+## 目录结构
+```
+.
+├── index.html              # React + TailwindCSS 单页入口
+├── static/
+│   ├── auto-scheduler.js   # 自动排班算法与工具集合（挂载到 window.AutoScheduler）
+│   └── ai-propose.js       # DeepSeek AI 调整助手前端脚本
+├── api/
+│   ├── index.php           # 核心 RESTful API（登录、配置、历史版本、导出等）
+│   └── ai_propose.php      # 调用 DeepSeek 接口生成排班建议
+└── storage/
+    └── .gitignore          # 持久化状态文件（state.json）忽略配置
+```
+
+## 快速启动
+1. **准备后端（可选但推荐）**
+   ```bash
+   php -S 0.0.0.0:8000 -t .
+   ```
+   启动后，`http://localhost:8000/index.html` 即可访问。`api/index.php` 会自动初始化 `storage/state.json` 持久化文件并管理登录会话。
+
+2. **仅前端预览**
+   若暂时没有 PHP 环境，也可直接双击 `index.html` 体验本地功能。此时部分依赖后端的功能（登录、历史版本、导出等）会提示请求失败，但界面不会崩溃。
+
+## API 摘要
+`api/index.php` 内置了最常用的接口，全部返回 JSON：
+- `POST /api/login` / `POST /api/logout`：基于 session 的登录会话管理，默认账户为 `admin`（空密码）。
+- `GET /api/org-config` / `POST /api/org-config`：读取或保存组织结构、账号和团队信息。
+- `GET /api/schedule`：按团队读取最近保存的排班数据；若无历史记录则返回默认空模板。
+- `POST /api/schedule/save`：保存最新排班并生成带版本号的历史记录，包含冲突检测（返回 409）。
+- `GET /api/schedule/versions`、`GET /api/version`、`POST /api/schedule/version/delete`：历史版本的读取与删除（删除仅限 `super` 角色）。
+- `GET /api/export/xlsx`：导出最新排班为 CSV（Excel 可直接打开）。
+- `POST /api/ai_propose.php`：示例调用 DeepSeek API 的 AI 调整接口（需在环境变量中配置 `DEEPSEEK_API_KEY`）。
+
+所有异常情况（参数缺失、权限不足、网络错误等）都会返回带 `message` 字段的 JSON，前端收到后会通过顶部错误栏提示，避免应用崩溃。
 
 ## 自动排班算法
-`auto-scheduler.js` 对外暴露的核心能力包括：
-- 日期工具：`fmt`、`enumerateDates`、`dateAdd` 等。
-- 基础数据操作：`getVal`、`setVal`、`countByEmpInRange` 等。
-- 规则检查：连续上班限制、休息偏好解析、夜班/中班后的休息规则等。
-- 排班生成与调整：
-  - `buildWhiteFiveTwo`：根据休息偏好生成白班 5-2 基础排布。
-  - `applyAlternateByCycle`、`clampDailyByRange`、`clampPersonByRange`：控制中班比例、个人/日均分布。
-  - `adjustWithHistory`：结合历史工时和管理员配置对个人班次进行细调。
-  - `autoAssignNightAndM2`：自动分配夜班与中2班并处理后续休息。
+`static/auto-scheduler.js` 暴露了一个包含数十个实用函数的 `window.AutoScheduler` 对象，涵盖：
+- **日期与数据工具**：`fmt`、`enumerateDates`、`dateAdd`、`getVal`、`setVal` 等。
+- **规则校验**：连续上班上限、夜班休息、中班连班冲突、休息偏好合法化等。
+- **生成与调优**：`buildWhiteFiveTwo`、`applyAlternateByCycle`、`clampDailyByRange`、`clampPersonByRange`、`adjustWithHistory`、`autoAssignNightAndM2` 等。
+- **统计辅助**：`countByEmpInRange`、`dailyMidCount`、`mixedCyclesCount`、`statsForEmployee` 等。
 
-模块同时导出 `REST_PAIRS`、`normalizeRestPair` 等工具，主页面和统计视图直接复用，避免重复实现。
+页面主脚本会在启动时自动校验 `window.AutoScheduler` 是否可用，并在 `console` 中运行一套自检用例，帮助定位潜在的规则冲突。
 
-## 主要前端流程
-1. `index.html` 首次加载时从 `localStorage` 读取组织配置与团队排班缓存；若不存在则创建默认结构。
-2. 用户可在侧边栏切换视图（排班表、批量调度、员工管理、统计、历史、设置、角色）。
-3. 自动排班入口会调用 `window.AutoScheduler` 提供的算法：生成基础排布、迭代调整、结合历史记录、自动排夜班等，并将结果写回页面状态。
-4. 自检模块（`selfTests`）在控制台运行一组用例，确保常见规则仍被满足。
+## AI 调整助手
+`static/ai-propose.js` 为任何已有排班表注入一键 AI 调整能力：
+- 默认直接访问 `window.ScheduleState`，也可自动解析 DOM 表格数据；
+- 调用 `/api/ai_propose.php` 后会先做本地强校验（如夜班休 2 天、中 1→白 禁止等），再应用到页面；
+- UI 通过 Corner Button 悬浮按钮呈现，支持预览与确认。
 
-## 自定义/扩展建议
-- 若需调整算法，可直接编辑 `auto-scheduler.js`，或在其他脚本中调用 `window.AutoScheduler` 暴露的函数进行组合。
-- 新增前端功能时，优先通过 `AutoScheduler` 获取已有工具函数，避免在业务层重复实现日期/排班逻辑。
-- 可根据需要扩展 `ai-propose.js` 与后端 API，实现 AI 回传的排班方案验证与回放。
+## 前端体验亮点
+- TailwindCSS + 自定义动画，保证低占用的平滑过渡效果；
+- 响应式侧边栏与浮动进度条，支持移动端；
+- 全局错误捕获（`window.onerror`、`unhandledrejection`），确保任何异常都以提示方式呈现。
 
+## 自定义与扩展
+- **算法优化**：直接在 `static/auto-scheduler.js` 内编写新函数，或组合现有 API，React 组件无需改动。
+- **后端扩展**：`api/index.php` 结构清晰，可继续添加导出、统计、审计等接口。写入操作统一通过 `saveState()` 带文件锁实现，避免并发覆盖。
+- **部署**：静态资源可托管在任意 CDN/对象存储，API 可部署到任何支持 PHP 8+ 的环境（含 serverless 平台）。
+
+欢迎在此基础上继续迭代排班算法或接入真实业务数据。
