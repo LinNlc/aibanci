@@ -246,6 +246,162 @@ function compute_history_profile(PDO $pdo, string $team, ?string $beforeStart = 
   return $profile;
 }
 
+function normalize_import_date($value): ?string {
+  if ($value instanceof \DateTimeInterface) {
+    return $value->format('Y-m-d');
+  }
+  if (is_numeric($value)) {
+    if (class_exists('\\PhpOffice\\PhpSpreadsheet\\Shared\\Date')) {
+      try {
+        $dt = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject((float)$value);
+        if ($dt instanceof \DateTimeInterface) {
+          return $dt->format('Y-m-d');
+        }
+      } catch (Throwable $e) {
+        // ignore and fall back
+      }
+    }
+    $timestamp = (int)round(((float)$value - 25569) * 86400);
+    if ($timestamp > 0) {
+      return gmdate('Y-m-d', $timestamp);
+    }
+  }
+  if (is_string($value)) {
+    $str = trim($value);
+  } else {
+    $str = trim((string)$value);
+  }
+  if ($str === '') return null;
+  $str = str_replace(['年', '月', '日', '.', '/'], ['-', '-', '', '-', '-'], $str);
+  if (preg_match('/^(\d{4})-(\d{1,2})-(\d{1,2})$/', $str, $m)) {
+    $y = (int)$m[1];
+    $mo = (int)$m[2];
+    $d = (int)$m[3];
+    if (checkdate($mo, $d, $y)) {
+      return sprintf('%04d-%02d-%02d', $y, $mo, $d);
+    }
+  }
+  if (preg_match('/^(\d{1,2})-(\d{1,2})-(\d{4})$/', $str, $m)) {
+    $mo = (int)$m[1];
+    $d = (int)$m[2];
+    $y = (int)$m[3];
+    if (checkdate($mo, $d, $y)) {
+      return sprintf('%04d-%02d-%02d', $y, $mo, $d);
+    }
+  }
+  return null;
+}
+
+function read_schedule_rows(string $file): array {
+  $rows = [];
+  $autoload = __DIR__ . '/vendor/autoload.php';
+  if (is_file($autoload)) {
+    require_once $autoload;
+    try {
+      $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($file);
+      $reader->setReadDataOnly(true);
+      $spreadsheet = $reader->load($file);
+      $sheet = $spreadsheet->getActiveSheet();
+      $highestRow = (int)$sheet->getHighestRow();
+      $highestColumn = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
+      for ($r = 1; $r <= $highestRow; $r++) {
+        $row = [];
+        for ($c = 1; $c <= $highestColumn; $c++) {
+          $cell = $sheet->getCellByColumnAndRow($c, $r);
+          $value = $cell ? $cell->getValue() : null;
+          if ($value instanceof \PhpOffice\PhpSpreadsheet\RichText\RichText) {
+            $value = $value->getPlainText();
+          }
+          if ($value instanceof \DateTimeInterface) {
+            $value = $value->format('Y-m-d');
+          }
+          if (is_string($value)) {
+            $value = trim($value);
+          }
+          $row[] = $value;
+        }
+        $rows[] = $row;
+      }
+    } catch (Throwable $e) {
+      $rows = [];
+    }
+  }
+  if (!$rows) {
+    $handle = fopen($file, 'r');
+    if ($handle) {
+      while (($cols = fgetcsv($handle)) !== false) {
+        $rows[] = array_map(static function ($item) {
+          return is_string($item) ? trim($item) : $item;
+        }, $cols);
+      }
+      fclose($handle);
+    }
+  }
+  return $rows;
+}
+
+function parse_schedule_from_rows(array $rows): array {
+  $rows = array_values(array_filter($rows, static function ($row) {
+    return is_array($row);
+  }));
+  if (!$rows) {
+    throw new RuntimeException('文件为空或格式不正确');
+  }
+  $headerRaw = $rows[0];
+  $header = [];
+  foreach ($headerRaw as $col) {
+    $header[] = is_string($col) ? trim($col) : (is_null($col) ? '' : (string)$col);
+  }
+  while (count($header) > 0 && $header[count($header) - 1] === '') {
+    array_pop($header);
+  }
+  if (count($header) < 3) {
+    throw new RuntimeException('请使用模板填写日期、星期和至少一名员工');
+  }
+  $employees = [];
+  for ($i = 2; $i < count($header); $i++) {
+    $name = trim((string)$header[$i]);
+    if ($name === '') continue;
+    $employees[] = $name;
+  }
+  $employees = array_values(array_unique($employees));
+  if (!$employees) {
+    throw new RuntimeException('请在表头（第 3 列开始）填写员工姓名');
+  }
+  $data = [];
+  foreach ($rows as $index => $cols) {
+    if ($index === 0) continue;
+    if (!is_array($cols)) continue;
+    $ymd = normalize_import_date($cols[0] ?? '');
+    if (!$ymd) continue;
+    if (!isset($data[$ymd])) {
+      $data[$ymd] = [];
+    }
+    foreach ($employees as $empIndex => $emp) {
+      $cell = $cols[$empIndex + 2] ?? '';
+      if ($cell instanceof \DateTimeInterface) {
+        $cell = $cell->format('H:i');
+      }
+      if (is_array($cell)) {
+        $cell = '';
+      }
+      if (is_numeric($cell) && !is_string($cell)) {
+        $cell = (string)$cell;
+      }
+      $value = is_string($cell) ? trim($cell) : (is_null($cell) ? '' : (string)$cell);
+      if ($value === '') continue;
+      $data[$ymd][$emp] = $value;
+    }
+  }
+  if (!$data) {
+    throw new RuntimeException('未检测到可导入的排班数据');
+  }
+  ksort($data);
+  $start = array_key_first($data);
+  $end = array_key_last($data);
+  return [$employees, $data, $start, $end];
+}
+
 // ===== 路由 =====
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $method = $_SERVER['REQUEST_METHOD'];
@@ -551,6 +707,64 @@ switch (true) {
     $stmt->execute([$json]);
     send_json(['ok' => true]);
 
+  case $method === 'GET' && $path === '/template/xlsx':
+    $filename = '排班导入模板';
+    $employees = ['员工A', '员工B'];
+    $dates = [];
+    $today = new DateTime('now');
+    for ($i = 0; $i < 7; $i++) {
+      $d = clone $today;
+      $d->modify('+' . $i . ' day');
+      $ymd = $d->format('Y-m-d');
+      $dates[] = $ymd;
+    }
+    $header = array_merge(['日期', '星期'], $employees);
+    $rows = [];
+    foreach ($dates as $idx => $ymd) {
+      $row = [$ymd, '周' . cn_week($ymd)];
+      foreach ($employees as $empIndex => $empName) {
+        $row[] = ($idx + $empIndex) % 2 === 0 ? '白' : '休';
+      }
+      $rows[] = $row;
+    }
+    $autoload = __DIR__ . '/vendor/autoload.php';
+    if (is_file($autoload)) {
+      require_once $autoload;
+      try {
+        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $sheet = $spreadsheet->getActiveSheet();
+        $col = 1;
+        foreach ($header as $value) {
+          $sheet->setCellValueByColumnAndRow($col++, 1, $value);
+        }
+        $r = 2;
+        foreach ($rows as $rowVals) {
+          $col = 1;
+          foreach ($rowVals as $cell) {
+            $sheet->setCellValueByColumnAndRow($col++, $r, $cell);
+          }
+          $r++;
+        }
+        header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '.xlsx"');
+        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+        $writer->save('php://output');
+        exit;
+      } catch (Throwable $e) {
+        // fall through to CSV
+      }
+    }
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '.csv"');
+    $out = fopen('php://output', 'w');
+    fwrite($out, chr(0xEF) . chr(0xBB) . chr(0xBF));
+    fputcsv($out, $header);
+    foreach ($rows as $rowVals) {
+      fputcsv($out, $rowVals);
+    }
+    fclose($out);
+    exit;
+
   // 导出：优先 XLSX，失败回退 CSV
   case $method === 'GET' && $path === '/export/xlsx':
     $team  = (string)($_GET['team']  ?? 'default');
@@ -608,6 +822,34 @@ switch (true) {
     }
     fclose($out);
     exit;
+
+  case $method === 'POST' && $path === '/import/xlsx':
+    if (empty($_FILES['file'])) {
+      send_error('请上传 Excel/CSV 文件', 400);
+    }
+    $file = $_FILES['file'];
+    $error = $file['error'] ?? UPLOAD_ERR_OK;
+    if ($error !== UPLOAD_ERR_OK) {
+      send_error('文件上传失败', 400, ['code' => $error]);
+    }
+    $tmpName = $file['tmp_name'] ?? '';
+    if (!$tmpName || !is_file($tmpName)) {
+      send_error('文件上传失败', 400);
+    }
+    try {
+      $rows = read_schedule_rows($tmpName);
+      [$employees, $data, $start, $end] = parse_schedule_from_rows($rows);
+    } catch (Throwable $e) {
+      send_error($e->getMessage() ?: '导入失败', 400);
+    }
+    send_json([
+      'ok' => true,
+      'employees' => $employees,
+      'data' => $data,
+      'start' => $start,
+      'end' => $end,
+      'message' => '导入成功',
+    ]);
 
   default:
     send_error('Not Found', 404);
