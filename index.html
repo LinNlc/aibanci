@@ -788,6 +788,12 @@
         setViewEnd(planEnd);
       }, [planStart, planEnd]);
 
+      useEffect(()=>{
+        if(viewManuallyAdjustedRef.current) return;
+        setViewStart(planStart);
+        setViewEnd(planEnd);
+      }, [planStart, planEnd]);
+
       const [shiftColors, setShiftColors] = useState({ ...defaultShiftColors });
       const [staffingAlerts, setStaffingAlerts] = useState(()=> normalizeStaffingAlerts());
       const [adminDays, setAdminDays] = useState(0);
