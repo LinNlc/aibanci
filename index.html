@@ -6,13 +6,86 @@
   <title>排班助手（测试版）</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    :root { --brand: 88 80 236; }
-    @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(8px) scale(.98);} to { opacity: 1; transform: translateY(0) scale(1);} }
-    .animate-fade-in { animation: fadeSlideIn .35s ease both; }
-    .grid-wrap { height: calc(100vh - 260px); overflow: auto; }
-    th.sticky { position: sticky; top: 0; background: rgb(249 250 251/0.95); z-index: 3; backdrop-filter: blur(4px); }
+    :root {
+      --brand: 88 80 236;
+      --glass-bg: rgba(255, 255, 255, 0.78);
+    }
+    body {
+      min-height: 100vh;
+      font-family: "Inter", "Noto Sans SC", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: radial-gradient(circle at top, rgba(99, 102, 241, 0.18), transparent 55%),
+                  radial-gradient(circle at bottom, rgba(14, 165, 233, 0.12), transparent 60%),
+                  linear-gradient(180deg, rgba(248, 250, 252, 0.92), rgba(241, 245, 249, 0.95));
+      color: #111827;
+      position: relative;
+      overflow-x: hidden;
+    }
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      inset: auto;
+      width: 420px;
+      height: 420px;
+      pointer-events: none;
+      filter: blur(120px);
+      opacity: 0.35;
+      z-index: -1;
+      transform: translate3d(0, 0, 0);
+      animation: ambientFloat 14s ease-in-out infinite;
+    }
+    body::before {
+      background: radial-gradient(circle, rgba(79, 70, 229, 0.45), transparent 70%);
+      top: -160px;
+      right: -60px;
+    }
+    body::after {
+      background: radial-gradient(circle, rgba(6, 182, 212, 0.45), transparent 70%);
+      bottom: -160px;
+      left: -40px;
+      animation-delay: -6s;
+    }
+    @keyframes ambientFloat {
+      0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+      50% { transform: translate3d(20px, -10px, 0) scale(1.05); }
+    }
+    @keyframes fadeSlideIn {
+      from {
+        opacity: 0;
+        transform: translateY(14px) scale(.97);
+        filter: blur(6px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        filter: blur(0);
+      }
+    }
+    .animate-fade-in { animation: fadeSlideIn .4s ease both; }
+    .page-shell { position: relative; }
+    .glass-surface {
+      background: var(--glass-bg);
+      backdrop-filter: blur(18px);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      box-shadow: 0 18px 60px -35px rgba(79, 70, 229, 0.6);
+    }
+    .grid-wrap { height: calc(100vh - 260px); overflow: auto; scrollbar-gutter: stable both-edges; }
+    .grid-wrap::-webkit-scrollbar,
+    .logbox::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    .grid-wrap::-webkit-scrollbar-thumb,
+    .logbox::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, 0.45);
+      border-radius: 999px;
+    }
+    .grid-wrap::-webkit-scrollbar-track,
+    .logbox::-webkit-scrollbar-track { background: transparent; }
+    th.sticky { position: sticky; top: 0; background: rgb(248 250 252 / 0.96); z-index: 3; backdrop-filter: blur(6px); }
     td, th { white-space: nowrap; }
-    input.cell { width: 6rem; padding-right: 1.75rem; }
+    input.cell { width: 6rem; padding-right: 1.75rem; transition: box-shadow .2s ease, transform .2s ease; }
+    input.cell:focus { box-shadow: 0 8px 18px -12px rgba(79, 70, 229, 0.55); transform: translateY(-1px); }
     .cell-wrap { position: relative; }
     .cell-toggle { position: absolute; right: .25rem; top: .35rem; width: 1.5rem; height: 1.5rem; font-size: 0; color: transparent; background: transparent; border: none; cursor: pointer; }
     .cell-toggle:focus-visible { outline: 2px solid rgb(129 140 248); outline-offset: 2px; }
@@ -21,28 +94,97 @@
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     #errbar { display:none; }
     #errbar.show { display:block; }
-    .left-sticky { position: sticky; left: 0; z-index: 2; background: white; }
-    .left-sticky-2 { position: sticky; left: 8.5rem; z-index: 2; background: white; }
-    .left-sticky-3 { position: sticky; left: 14.8rem; z-index: 2; background: white; }
+    .left-sticky { position: sticky; left: 0; z-index: 2; background: rgba(255,255,255,0.92); backdrop-filter: blur(6px); }
+    .left-sticky-2 { position: sticky; left: 8.5rem; z-index: 2; background: rgba(255,255,255,0.92); backdrop-filter: blur(6px); }
+    .left-sticky-3 { position: sticky; left: 14.8rem; z-index: 2; background: rgba(255,255,255,0.92); backdrop-filter: blur(6px); }
     .badge { display:inline-flex; align-items:center; justify-content:center; min-width:2.25rem; height:1.75rem; border-radius:9999px; padding:0 .5rem; font-size:.75rem; }
     .floating-progress { position: fixed; right: 16px; bottom: 16px; z-index: 50; width: 340px; }
-    .fp-card { background: linear-gradient(135deg, rgba(88,80,236,.12), rgba(14,165,233,.12)); border: 1px solid rgba(88,80,236,.18); box-shadow: 0 10px 30px rgba(0,0,0,.08); }
-    .logbox { max-height: 140px; overflow:auto; background: rgba(255,255,255,.7); border-radius: .75rem; border: 1px solid rgba(88,80,236,.18); }
-    .picker { box-shadow: 0 10px 30px rgba(0,0,0,.12); }
+    .fp-card { background: linear-gradient(135deg, rgba(88,80,236,.15), rgba(14,165,233,.12)); border: 1px solid rgba(88,80,236,.24); box-shadow: 0 18px 55px -25px rgba(59,130,246,.65); backdrop-filter: blur(14px); }
+    .logbox { max-height: 140px; overflow:auto; background: rgba(255,255,255,.72); border-radius: .75rem; border: 1px solid rgba(148,163,184,.25); }
+    .picker { box-shadow: 0 16px 40px rgba(30, 64, 175, 0.18); border-radius: 0.75rem; border: 1px solid rgba(148, 163, 184, 0.25); }
+    .side-active::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 0.75rem;
+      background: linear-gradient(120deg, rgba(99,102,241,0.18), transparent 70%);
+      opacity: 0;
+      transition: opacity .3s ease;
+      z-index: -1;
+    }
+    .side-active:hover::after { opacity: 1; }
+    @media (prefers-reduced-motion: reduce) {
+      body::before,
+      body::after { animation: none; }
+      .animate-fade-in { animation: none; }
+      input.cell { transition: none; }
+    }
   </style>
 </head>
-<body class="bg-gray-50">
-  <div id="errbar" class="bg-red-50 text-red-700 text-sm px-4 py-2"></div>
+<body class="page-shell">
+  <div id="errbar" class="glass-surface border border-red-200/40 text-red-600 text-sm px-4 py-2 rounded-xl shadow-sm max-w-3xl mx-auto mt-4"></div>
   <div id="root"></div>
 
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin="anonymous"></script>
 
+  <script src="./static/auto-scheduler.js"></script>
+  <script src="./static/ai-propose.js" defer></script>
   <script type="text/babel" data-presets="env,react">
     const { useState, useMemo, useEffect, useRef } = React;
+    if(!window.AutoScheduler){
+      throw new Error('AutoScheduler 模块未加载');
+    }
+    const {
+      SHIFT_WORK_TYPES,
+      REST_PAIRS,
+      fmt,
+      enumerateDates,
+      dateAdd,
+      isWork,
+      getVal,
+      setVal,
+      countByEmpInRange,
+      countRunLeft,
+      countRunRight,
+      wouldExceed6,
+      normalizeRestPair,
+      sanitizeRestPairValue,
+      pairToSet,
+      dayToW,
+      isRestDayForEmp,
+      buildWhiteFiveTwo,
+      buildWorkBlocks,
+      cyclesForEmp,
+      isRightEdgeWhite,
+      isLeftEdgeMid,
+      dailyMidCount,
+      dailyWhiteCount,
+      empMidCountInRange,
+      empWhiteCountInRange,
+      mixedCyclesCount,
+      longestRun,
+      trySetVal,
+      repairNoMidToWhite,
+      applyAlternateByCycle,
+      clampDailyByRange,
+      clampPersonByRange,
+      statsForEmployee,
+      sortedByHistory,
+      adjustEmployeeSchedule,
+      adjustWithHistory,
+      normalizeNightRules,
+      autoAssignNightAndM2,
+    } = window.AutoScheduler;
 
-    function globalErr(msg){ const bar = document.getElementById('errbar'); if(bar){ bar.textContent = '错误：' + msg; bar.className = 'show bg-red-50 text-red-700 text-sm px-4 py-2'; } }
+      function globalErr(msg){
+        const bar = document.getElementById('errbar');
+        if(bar){
+          bar.textContent = '错误：' + msg;
+          bar.className = 'show glass-surface border border-red-200/60 text-red-600 text-sm px-4 py-2 rounded-xl shadow-sm max-w-3xl mx-auto mt-4';
+        }
+      }
     window.addEventListener('error', (e)=> globalErr(e?.message || '脚本错误'));
     window.addEventListener('unhandledrejection', (e)=> globalErr(e?.reason?.message || String(e?.reason || 'Promise 错误')));
 
@@ -72,13 +214,8 @@
     const WN = ['日','一','二','三','四','五','六'];
     const today = new Date();
     const SHIFT_TYPES = ['白','中1','中2','夜','休'];
-    const SHIFT_WORK_TYPES = ['白','中1','中2','夜'];
-
-    function fmt(d) { return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10); }
     function monthRangeOf(dateObj){ const y = dateObj.getFullYear(); const m = dateObj.getMonth(); const start = new Date(y, m, 1); const end = new Date(y, m + 1, 0); return [fmt(start), fmt(end)]; }
-    function enumerateDates(start, end){ const out=[]; let d=new Date(start); const e=new Date(end); while(d<=e){ out.push(fmt(d)); d.setDate(d.getDate()+1); } return out; }
     function dow(ymd){ return new Date(ymd).getDay(); }
-    function dateAdd(ymd, delta){ const d=new Date(ymd); d.setDate(d.getDate()+delta); return fmt(d); }
     function monthListBetween(start, end){
       const startDate = new Date(start);
       const endDate = new Date(end);
@@ -109,25 +246,43 @@
       return fmt(d);
     }
 
-    async function apiGet(path){ const r = await fetch(API_BASE + path, { credentials: 'include' }); if(!r.ok){ let msg='请求失败'; try { const e=await r.json(); msg=e.message||msg; } catch{} throw new Error(msg); } return r.json(); }
-    async function apiPost(path, body){ const r = await fetch(API_BASE + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body||{}), credentials: 'include' }); if(!r.ok){ let ejson=null; try { ejson = await r.json(); } catch{} const err = new Error((ejson&&ejson.message)||'请求失败'); if(ejson) err.payload = ejson; throw err; } return r.json(); }
-
-    const isWork = (v)=> !!(v && v!=='休');
-    function getVal(data, day, emp){ return (data[day]||{})[emp]||''; }
-    function setVal(map, day, emp, val){ const row = { ...(map[day]||{}) }; row[emp] = val; map[day] = row; }
-
-    function countByEmpInRange(employees, data, start, end){
-      const dates = enumerateDates(start,end);
-      const counter = {}; for(const e of employees){ counter[e] = { 总:0 }; for(const s of SHIFT_WORK_TYPES){ counter[e][s]=0; } }
-      for(const d of dates){ const row = data[d]||{}; for(const e of employees){ const v = row[e]||''; if(!v || v==='休') continue; counter[e]['总']++; if(SHIFT_WORK_TYPES.includes(v)) counter[e][v]++; } }
-      return counter;
+    async function apiRequest(path, options={}, fallback='请求失败'){
+      const reqOptions = { credentials: 'include', ...options };
+      reqOptions.headers = { ...(options.headers || {}) };
+      let response;
+      try {
+        response = await fetch(API_BASE + path, reqOptions);
+      } catch (networkErr) {
+        const message = networkErr && networkErr.message ? `网络异常：${networkErr.message}` : '网络异常，请稍后重试';
+        throw new Error(message);
+      }
+      const contentType = response.headers.get('content-type') || '';
+      const isJson = contentType.includes('application/json');
+      if (!response.ok) {
+        let payload = null;
+        if (isJson) {
+          try { payload = await response.json(); } catch {}
+        }
+        const err = new Error((payload && (payload.message || payload.error)) || fallback);
+        if (payload) err.payload = payload;
+        throw err;
+      }
+      if (!isJson) {
+        return {};
+      }
+      try {
+        return await response.json();
+      } catch (parseErr) {
+        throw new Error('响应解析失败');
+      }
+    }
+    async function apiGet(path){
+      return apiRequest(path);
+    }
+    async function apiPost(path, body){
+      return apiRequest(path, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body||{}) });
     }
 
-    function countRunLeft(data, d, e){ let c=0; for(let i=-1;i>=-10;i--){ const ymd=dateAdd(d,i); const v=getVal(data, ymd, e); if(isWork(v)) c++; else break; } return c; }
-    function countRunRight(data, d, e){ let c=0; for(let i=1;i<=10;i++){ const ymd=dateAdd(d,i); const v=getVal(data, ymd, e); if(isWork(v)) c++; else break; } return c; }
-    function wouldExceed6(data, e, d, newV){ if(!isWork(newV)) return false; const L=countRunLeft(data,d,e); const R=countRunRight(data,d,e); return (L+1+R)>6; }
-
-    const REST_PAIRS = ['12','23','34','56','71'];
     const MENU_KEYS = ['grid','batch','album','users','stats','history','settings','roles'];
     const defaultShiftColors = { '白':'#eef2ff','中1':'#e0f2fe','中2':'#cffafe','夜':'#fee2e2','休':'#f3f4f6' };
     const defaultStaffingAlerts = {
@@ -135,14 +290,6 @@
       white: { threshold: 0, lowColor: '#fef3c7', highColor: '#bfdbfe' },
       mid1: { threshold: 0, lowColor: '#fef3c7', highColor: '#bae6fd' }
     };
-    const normalizeRestPair = (pair)=> pair==='17' ? '71' : pair;
-    function sanitizeRestPairValue(val){
-      if(!val) return '';
-      const digits = String(val).replace(/\D/g,'');
-      if(digits.length !== 2) return '';
-      const normalized = normalizeRestPair(digits);
-      return REST_PAIRS.includes(normalized) ? normalized : digits;
-    }
     function sanitizeRestPrefsMap(map){
       const next = {};
       Object.entries(map||{}).forEach(([emp, raw])=>{
@@ -365,466 +512,8 @@
     }
     const ORG_STORAGE_KEY = 'scheduler_org_config_v1';
     const TEAM_STATE_STORAGE_KEY = 'scheduler_team_states_v1';
-    const pairToSet = (p)=>{
-      const cleaned = sanitizeRestPairValue(p);
-      if(cleaned.length !== 2) return new Set();
-      const m={"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7};
-      const set = new Set();
-      const first = m[cleaned[0]];
-      const second = m[cleaned[1]];
-      if(typeof first === 'number') set.add(first);
-      if(typeof second === 'number') set.add(second);
-      return set;
-    };
-    const dayToW = (day)=> ((new Date(day).getDay()+6)%7)+1; // 周一=1 ... 周日=7
-    function isRestDayForEmp(restPrefs, emp, day){ const p = restPrefs?.[emp]; if(!p) return false; const set = pairToSet(p); const w = dayToW(day); return set.has(w); }
-
-    function buildWhiteFiveTwo({employees, data, start, end, restPrefs}){
-      const dates = enumerateDates(start,end);
-      const next = {...data};
-      for(const d of dates){ const r={...(next[d]||{})}; for(const e of employees){ const cur = r[e]||''; if(cur==='夜' || cur==='中2') continue; r[e] = isRestDayForEmp(restPrefs,e,d) ? '休' : '白'; }
-        next[d]=r; }
-      return next;
-    }
-
-    function buildWorkBlocks(data, emp, start, end){
-      const days = enumerateDates(start, end);
-      const blocks = [];
-      let cur=[];
-      for(const d of days){ const v=getVal(data,d,emp); const work = (v!=='休' && v!=='夜' && v!=='中2'); if(work){ cur.push(d); } else { if(cur.length) { blocks.push(cur); cur=[]; } } }
-      if(cur.length) blocks.push(cur);
-      return blocks;
-    }
-    function cyclesForEmp(data, emp, start, end){
-      const blocks = buildWorkBlocks(data, emp, start, end);
-      const cycles=[]; for(const b of blocks){ const k = Math.floor(b.length/5); for(let i=0;i<k;i++){ cycles.push(b.slice(i*5, i*5+5)); } }
-      return cycles; // 每项是 5 个日期
-    }
-
-    function isRightEdgeWhite(data, day, emp){ const v=getVal(data,day,emp); if(v!=='白') return false; const t1=dateAdd(day,1); const nxt=getVal(data,t1,emp); return nxt!=='白'; }
-    function isLeftEdgeMid(data, day, emp){ const v=getVal(data,day,emp); if(v!=='中1') return false; const t0=dateAdd(day,-1); const pre=getVal(data,t0,emp); return pre!=='中1'; }
-
-    function dailyMidCount(data, day, employees){ const row=data[day]||{}; let c=0; for(const e of employees){ if(row[e]==='中1') c++; } return c; }
-    function dailyWhiteCount(data, day, employees){ const row=data[day]||{}; let c=0; for(const e of employees){ if(row[e]==='白') c++; } return c; }
-    function empMidCountInRange(data, emp, start, end){ let c=0; for(const d of enumerateDates(start,end)){ if(getVal(data,d,emp)==='中1') c++; } return c; }
-    function empWhiteCountInRange(data, emp, start, end){ let c=0; for(const d of enumerateDates(start,end)){ if(getVal(data,d,emp)==='白') c++; } return c; }
-
-    // 统计混合周期数量
-    function mixedCyclesCount(data, emp, start, end){
-      const cycles = cyclesForEmp(data, emp, start, end);
-      let c = 0;
-      for(const cyc of cycles){ let hasW=false, hasM=false; for(const d of cyc){ const v=getVal(data,d,emp); if(v==='白') hasW=true; if(v==='中1') hasM=true; } if(hasW && hasM) c++; }
-      return c;
-    }
-
-    // 个人最大连续上班天数
-    function longestRun(data, emp, start, end){
-      let max=0, cur=0; for(const d of enumerateDates(start,end)){ if(isWork(getVal(data,d,emp))){ cur++; max=Math.max(max,cur); } else { cur=0; } } return max; }
-
-    // 安全写入：检查 6 连班、相邻“中1→白”禁忌、混合周期上限
-    function trySetVal(next, day, emp, newV, {start, end, mixMaxRatio}){
-      const prev = getVal(next, day, emp);
-      if(prev === newV) return true;
-      if(wouldExceed6(next, emp, day, newV)) return false;
-      const prevDay = dateAdd(day, -1), nextDay = dateAdd(day, 1);
-      if(newV==='白' && getVal(next, prevDay, emp)==='中1') return false;
-      if(newV==='中1' && getVal(next, nextDay, emp)==='白') return false;
-      const tmp = JSON.parse(JSON.stringify(next));
-      setVal(tmp, day, emp, newV);
-      if(typeof mixMaxRatio==='number'){
-        const tot = cyclesForEmp(tmp, emp, start, end).length;
-        const allow = Math.ceil(tot * mixMaxRatio - 1e-9);
-        const mixed = mixedCyclesCount(tmp, emp, start, end);
-        if(mixed > allow) return false;
-      }
-      setVal(next, day, emp, newV);
-      return true;
-    }
-
-    function repairNoMidToWhite({data, employees, start, end}){
-      const next = {...data};
-      for(const e of employees){ const ds = enumerateDates(start,end); for(let i=0;i<ds.length-1;i++){ const a=ds[i], b=ds[i+1]; const va=getVal(next,a,e), vb=getVal(next,b,e); if(va==='中1' && vb==='白'){
-            if(!wouldExceed6(next, e, b, '中1')){ setVal(next, b, e, '中1'); } else { setVal(next, a, e, '白'); }
-          } }
-      }
-      return next;
-    }
-
-    function applyAlternateByCycle({employees, data, start, end}, mixMaxRatio=1){
-      const next = {...data};
-      employees.forEach((e,idx)=>{
-        const startIsWhite = (idx % 2 === 0);
-        const cycles = cyclesForEmp(next, e, start, end);
-        cycles.forEach((cyc,ci)=>{
-          const shouldMid = startIsWhite ? (ci % 2 === 1) : (ci % 2 === 0);
-          if(shouldMid){ for(const d of cyc){ if(isRightEdgeWhite(next, d, e)) trySetVal(next, d, e, '中1', {start,end,mixMaxRatio}); }
-          }
-        });
-      });
-      return repairNoMidToWhite({ data: next, employees, start, end });
-    }
-
-    function clampDailyByRange({employees, data, start, end, rMin=0.3, rMax=0.7, maxRounds=300, mixMaxRatio=1}){
-      let cur = JSON.parse(JSON.stringify(data));
-      const days = enumerateDates(start,end);
-      for(let round=0; round<maxRounds; round++){
-        let changed=false;
-        for(const d of days){
-          const W = dailyWhiteCount(cur,d,employees);
-          const M = dailyMidCount(cur,d,employees);
-          const A = W + M; if(A===0) continue;
-          const low = Math.ceil(rMin * W);
-          const high = Math.floor(rMax * W);
-          if(M > high){
-            let cands = employees.filter(e=> isLeftEdgeMid(cur, d, e));
-            cands = cands.sort((a,b)=> (empWhiteCountInRange(cur,b,start,end)>0?empMidCountInRange(cur,b,start,end)/empWhiteCountInRange(cur,b,start,end):99) - (empWhiteCountInRange(cur,a,start,end)>0?empMidCountInRange(cur,a,start,end)/empWhiteCountInRange(cur,a,start,end):99));
-            for(const e of cands){ if(trySetVal(cur, d, e, '白', {start,end,mixMaxRatio})) { changed=true; if(dailyMidCount(cur,d,employees) <= high) break; } }
-          } else if (M < low){
-            let cands = employees.filter(e=> isRightEdgeWhite(cur, d, e));
-            cands = cands.sort((a,b)=> (empWhiteCountInRange(cur,a,start,end)>0?empMidCountInRange(cur,a,start,end)/empWhiteCountInRange(cur,a,start,end):0) - (empWhiteCountInRange(cur,b,start,end)>0?empMidCountInRange(cur,b,start,end)/empWhiteCountInRange(cur,b,start,end):0));
-            for(const e of cands){ if(trySetVal(cur, d, e, '中1', {start,end,mixMaxRatio})) { changed=true; if(dailyMidCount(cur,d,employees) >= low) break; } }
-          }
-        }
-        if(!changed) break;
-      }
-      return repairNoMidToWhite({ data: cur, employees, start, end });
-    }
-
-    function clampPersonByRange({employees, data, start, end, pMin=0.3, pMax=0.7, maxRounds=240, mixMaxRatio=1}){
-      let cur = JSON.parse(JSON.stringify(data));
-      const days = enumerateDates(start, end);
-      for(let round=0; round<maxRounds; round++){
-        let changed=false;
-        for(const e of employees){
-          const W = empWhiteCountInRange(cur,e,start,end);
-          const M = empMidCountInRange(cur,e,start,end);
-          if(W===0 && M===0) continue;
-          const low = Math.ceil(pMin * Math.max(1,W));
-          const high = Math.floor(pMax * Math.max(1,W));
-          if(M > high){
-            for(const d of days){
-              if(isLeftEdgeMid(cur, d, e)){
-                if(trySetVal(cur, d, e, '白', {start,end,mixMaxRatio})) { changed=true; break; }
-              }
-            }
-          } else if (M < low){
-            for(const d of days){
-              if(isRightEdgeWhite(cur, d, e)){
-                if(trySetVal(cur, d, e, '中1', {start,end,mixMaxRatio})) { changed=true; break; }
-              }
-            }
-          }
-        }
-        if(!changed) break;
-      }
-      return repairNoMidToWhite({ data: cur, employees, start, end });
-    }
-
-    function statsForEmployee(data, emp, start, end){
-      let white=0, mid=0, mid2=0, night=0, total=0;
-      for(const day of enumerateDates(start, end)){
-        const v = getVal(data, day, emp);
-        if(!v || v==='休') continue;
-        total++;
-        if(v==='白') white++;
-        else if(v==='中1') mid++;
-        else if(v==='中2') mid2++;
-        else if(v==='夜') night++;
-      }
-      return { white, mid, mid2, night, total };
-    }
-
-    function sortedByHistory(employees, historyProfile){
-      const totals = historyProfile?.shiftTotals || historyProfile?.shift_totals || {};
-      return employees.slice().sort((a,b)=>{
-        const ta = totals[a]?.total ?? totals[a]?.总 ?? 0;
-        const tb = totals[b]?.total ?? totals[b]?.总 ?? 0;
-        if(ta !== tb) return ta - tb;
-        const wa = totals[a]?.white ?? totals[a]?.白 ?? 0;
-        const wb = totals[b]?.white ?? totals[b]?.白 ?? 0;
-        if(wa !== wb) return wa - wb;
-        return a.localeCompare(b,'zh-CN');
-      });
-    }
-
-    function adjustEmployeeSchedule({ next, emp, days, spanStart, spanEnd, targetWhite, targetMid, targetTotal, mixMaxRatio }){
-      const count = ()=>{
-        let white=0, mid=0, total=0;
-        for(const day of days){
-          const v = getVal(next, day, emp);
-          if(!v || v==='休') continue;
-          total++;
-          if(v==='白') white++;
-          else if(v==='中1') mid++;
-        }
-        return { white, mid, total };
-      };
-      const tryConvert = (from, to)=>{
-        for(const day of days){
-          const v = getVal(next, day, emp);
-          if(v !== from) continue;
-          if(to === '休'){
-            const row = { ...(next[day]||{}) };
-            row[emp] = '休';
-            next[day] = row;
-            return true;
-          }
-          if(to === '白' || to === '中1'){
-            if(trySetVal(next, day, emp, to, { start: spanStart, end: spanEnd, mixMaxRatio })){
-              return true;
-            }
-          }
-        }
-        return false;
-      };
-      let guard = days.length * 8;
-      let cur = count();
-      while(cur.mid > targetMid && guard-- > 0){
-        if(cur.white < targetWhite){
-          if(!tryConvert('中1','白')) break;
-        } else if(!tryConvert('中1','休')){
-          break;
-        }
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.mid < targetMid && guard-- > 0){
-        if(!tryConvert('白','中1')){
-          if(!tryConvert('休','中1')) break;
-        }
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.white > targetWhite && guard-- > 0){
-        if(!tryConvert('白','休')) break;
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.white < targetWhite && guard-- > 0){
-        if(!tryConvert('休','白')){
-          if(!tryConvert('中1','白')) break;
-        }
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.total > targetTotal && guard-- > 0){
-        if(!tryConvert('白','休')){
-          if(!tryConvert('中1','休')) break;
-        }
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.total < targetTotal && guard-- > 0){
-        if(cur.white < targetWhite){
-          if(!tryConvert('休','白')){
-            if(!tryConvert('中1','白')) break;
-          }
-        } else {
-          if(!tryConvert('休','中1') && !tryConvert('白','中1')) break;
-        }
-        cur = count();
-      }
-    }
-
-    function adjustWithHistory({ data, employees, start, end, adminDays, historyProfile, mixMaxRatio=1, yearlyOptimize=false }){
-      if(!employees.length) return data;
-      const days = enumerateDates(start, end);
-      if(!days.length) return data;
-      const next = JSON.parse(JSON.stringify(data));
-      const totals = historyProfile?.shiftTotals || historyProfile?.shift_totals || {};
-      const lastAssignments = historyProfile?.lastAssignments || historyProfile?.last_assignments || {};
-      const spanStart = days[0];
-      const spanEnd = days[days.length-1];
-
-      if(lastAssignments && spanStart){
-        employees.forEach(emp=>{
-          const prev = lastAssignments[emp];
-          if(!prev) return;
-          if((prev==='夜' || prev==='中2') && isWork(getVal(next, spanStart, emp))){
-            setVal(next, spanStart, emp, '休');
-          }
-          if(prev==='中1' && getVal(next, spanStart, emp)==='白'){
-            setVal(next, spanStart, emp, '休');
-          }
-        });
-        if(yearlyOptimize){
-          employees.forEach(emp=>{
-            const prev = lastAssignments[emp];
-            if(prev === '休' && isWork(getVal(next, spanStart, emp))){
-              setVal(next, spanStart, emp, '休');
-            }
-          });
-        }
-      }
-
-      employees.forEach(emp=>{
-        const stats = statsForEmployee(next, emp, start, end);
-        const totalDays = days.length;
-        const targetTotal = (Number.isFinite(adminDays) && adminDays>0) ? Math.min(adminDays, totalDays) : stats.total;
-        const hist = totals[emp] || {};
-        const histTotal = hist.total ?? hist.总 ?? ((hist.white||hist.白||0)+(hist.mid||hist.中1||0)+(hist.mid2||hist.中2||0)+(hist.night||hist.夜||0));
-        let whiteShare = histTotal>0 ? (hist.white ?? hist.白 ?? 0)/histTotal : (stats.total? stats.white/Math.max(1,stats.total) : 0.6);
-        let midShare = histTotal>0 ? (hist.mid ?? hist.中1 ?? 0)/histTotal : (stats.total? stats.mid/Math.max(1,stats.total) : 0.4);
-        if(!Number.isFinite(whiteShare) || whiteShare<0) whiteShare = 0;
-        if(!Number.isFinite(midShare) || midShare<0) midShare = 0;
-        if(whiteShare + midShare > 1){
-          const sum = whiteShare + midShare;
-          whiteShare /= sum;
-          midShare /= sum;
-        }
-        let targetWhite = Math.round(targetTotal * whiteShare);
-        let targetMid = Math.round(targetTotal * midShare);
-        if(targetWhite + targetMid > targetTotal){
-          const overflow = targetWhite + targetMid - targetTotal;
-          if(targetMid >= overflow){
-            targetMid -= overflow;
-          } else {
-            targetWhite = Math.max(0, targetWhite - (overflow - targetMid));
-            targetMid = 0;
-          }
-        }
-        adjustEmployeeSchedule({ next, emp, days, spanStart, spanEnd, targetWhite, targetMid, targetTotal, mixMaxRatio });
-      });
-
-      return next;
-    }
-
-    function autoAssignNightAndM2({employees, data, start, end, override=false, nightRules, restPrefs={}}){
-      const rules = normalizeNightRules(nightRules);
-      const dates = enumerateDates(start,end);
-      const newData = { ...data };
-      const status = {};
-      for(const e of employees){ status[e] = { lastNight:null, lastMid2:null }; }
-      function gapFrom(lastDay, curDay){ if(!lastDay) return Number.POSITIVE_INFINITY; return (new Date(curDay) - new Date(lastDay)) / 86400000; }
-      function shouldRestFromHistory(emp, idx, kind){
-        if(idx===undefined || idx===null) return false;
-        const nightRestEnforced = rules.restAfterNight || rules.allowNightDay4;
-        if(!nightRestEnforced && !rules.restAfterMid2) return false;
-        for(let back=1; back<=2; back++){
-          const prevIdx = idx-back;
-          if(prevIdx < 0) continue;
-          const prevDay = dates[prevIdx];
-          const prevVal = getVal(newData, prevDay, emp);
-          if(nightRestEnforced && prevVal==='夜') return true;
-          if(rules.restAfterMid2 && prevVal==='中2'){
-            if(kind==='中2' && rules.allowDoubleMid2 && back===1) continue;
-            return true;
-          }
-        }
-        if(kind==='中2' && rules.allowDoubleMid2 && rules.restAfterMid2){
-          const prevDay = dates[idx-1];
-          const prevPrevDay = dates[idx-2];
-          if(prevDay && getVal(newData, prevDay, emp)==='中2' && prevPrevDay && getVal(newData, prevPrevDay, emp)==='中2') return true;
-        }
-        return false;
-      }
-      function ensureRest(emp, originIdx, daysCount, force=false){ for(let offset=1; offset<=daysCount; offset++){ const targetIdx = originIdx + offset; if(targetIdx >= dates.length) break; const day = dates[targetIdx]; const row = { ...(newData[day]||{}) }; const cur = row[emp] || ''; if(force || override || cur==='' || cur==='休'){ row[emp] = '休'; newData[day] = row; } } }
-      function capRest(emp, originIdx){ if(!rules.enforceRestCap) return; const targetIdx = originIdx + 3; if(targetIdx >= dates.length) return; const day = dates[targetIdx]; const row = { ...(newData[day]||{}) }; if(row[emp] === '休'){ const prevIdx = targetIdx - 1; const prevDay = prevIdx >=0 ? dates[prevIdx] : null; const prevVal = prevDay ? getVal(newData, prevDay, emp) : ''; row[emp] = prevVal === '白' ? '中1' : '白'; newData[day] = row; } }
-      function enforceNightDay4(emp, originIdx){ if(!rules.allowNightDay4) return; if(originIdx % 7 !== 3) return; ensureRest(emp, originIdx, 2, true); const day7Idx = originIdx + 3; if(day7Idx < dates.length){ const day7 = dates[day7Idx]; const row = { ...(newData[day7]||{}) }; if(row[emp] === '休' || !row[emp]){ row[emp] = '白'; newData[day7] = row; } }
-      }
-      for(let i=0; i<dates.length; i++){
-        const day = dates[i];
-        const baseRow = { ...(newData[day]||{}) };
-        if(!Object.values(baseRow).includes('夜')){
-          let candidates = employees.slice();
-          if(rules.prioritizeInterval){
-            candidates.sort((a,b)=> gapFrom(status[b].lastNight, day) - gapFrom(status[a].lastNight, day));
-          } else {
-            candidates.reverse();
-          }
-          const pickNight = candidates.find(emp=>{
-            const cur = baseRow[emp] || '';
-            if(cur==='休' || cur==='中2') return false;
-            if(!override && cur && cur!=='夜') return false;
-            if(shouldRestFromHistory(emp, i, '夜')) return false;
-            if(restPrefs && isRestDayForEmp(restPrefs, emp, day)) return false;
-            return true;
-          });
-          if(pickNight){
-            baseRow[pickNight] = '夜';
-            newData[day] = baseRow;
-            status[pickNight].lastNight = day;
-          }
-        } else {
-          newData[day] = baseRow;
-        }
-        const rowAfterNight = { ...(newData[day]||{}) };
-        if(!Object.values(rowAfterNight).includes('中2')){
-          let midCandidates = employees.slice().reverse();
-          const pickMid = midCandidates.find(emp=>{
-            const cur = rowAfterNight[emp] || '';
-            if(cur==='休' || cur==='夜') return false;
-            if(!override && cur && cur!=='中2') return false;
-            if(shouldRestFromHistory(emp, i, '中2')) return false;
-            if(!rules.allowDoubleMid2){
-              const prevDay = dates[i-1];
-              if(prevDay && getVal(newData, prevDay, emp)==='中2') return false;
-            }
-            if(restPrefs && isRestDayForEmp(restPrefs, emp, day)) return false;
-            return true;
-          });
-          if(pickMid){
-            rowAfterNight[pickMid] = '中2';
-            newData[day] = rowAfterNight;
-            status[pickMid].lastMid2 = day;
-          } else {
-            newData[day] = rowAfterNight;
-          }
-        } else {
-          newData[day] = rowAfterNight;
-        }
-        for(const emp of employees){
-          const val = getVal(newData, day, emp);
-          const st = status[emp];
-          if(val==='夜') st.lastNight = day;
-          if(val==='中2') st.lastMid2 = day;
-        }
-      }
-      if(rules.restAfterNight || rules.restAfterMid2){
-        for(const emp of employees){
-          for(let i=0; i<dates.length; i++){
-            const day = dates[i];
-            const val = getVal(newData, day, emp);
-            if(val==='夜'){
-              if(rules.restAfterNight){
-                ensureRest(emp, i, 2, true);
-                capRest(emp, i);
-              }
-              enforceNightDay4(emp, i);
-            }
-            if(val==='中2' && rules.restAfterMid2){
-              const nextDay = dates[i+1];
-              if(rules.allowDoubleMid2 && nextDay && getVal(newData, nextDay, emp)==='中2') continue;
-              ensureRest(emp, i, 2, true);
-              capRest(emp, i);
-            }
-          }
-        }
-      }
-      for(const e of employees){
-        let run = 0;
-        for(const day of dates){
-          const v = getVal(newData, day, e);
-          if(isWork(v)){
-            run++;
-            if(run>6){
-              const row = { ...(newData[day]||{}) };
-              if(row[e]!=='夜' && row[e]!=='中2'){
-                row[e] = '休';
-                newData[day] = row;
-                run = 0;
-              }
-            }
-          } else {
-            run = 0;
-          }
-        }
-      }
-      return newData;
-    }
-
     const MenuButton = ({active, icon, children, onClick}) => (
-      <button onClick={onClick} className={`relative w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 ${active? 'bg-indigo-50 text-indigo-700 side-active' : 'hover:bg-gray-100 text-gray-700'} `}>
+      <button onClick={onClick} className={`relative w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 ${active? 'bg-indigo-50 text-indigo-700 side-active' : 'hover:bg-gray-100 text-gray-700'}`}>
         <Icon name={icon} className={active? 'text-indigo-600' : 'text-gray-500'} />
         <span className="text-sm font-medium">{children}</span>
       </button>
@@ -844,12 +533,12 @@
       ];
       return (
         <div className={`dock fixed left-0 top-16 bottom-6 w-11 z-40 flex items-center`} onMouseEnter={()=>setOpen(true)} onMouseLeave={()=>setOpen(false)}>
-          <div className={`dock-panel absolute left-2 top-0 bottom-0 w-60 transform transition-transform duration-200 ${open? 'translate-x-0':'-translate-x-[115%]'} bg-white rounded-xl shadow p-2 border`}>
+          <div className={`dock-panel absolute left-2 top-0 bottom-0 w-60 transform transition-transform duration-200 ${open? 'translate-x-0':'-translate-x-[115%]'} glass-surface rounded-2xl p-3 border border-white/50 shadow-lg`}> 
             {items.filter(item=> menuPerms?.[item.key]?.visible).map(item=> (
               <MenuButton key={item.key} active={tab===item.key} icon={item.icon} onClick={()=>setTab(item.key)}>{item.label}</MenuButton>
             ))}
           </div>
-          <div className="dock-tab absolute right-[-12px] top-1/2 -translate-y-1/2 w-6 h-18 rounded-r-lg flex items-center justify-center bg-white text-gray-700 cursor-pointer shadow" onClick={()=>setOpen(v=>!v)}>
+          <div className="dock-tab absolute right-[-12px] top-1/2 -translate-y-1/2 w-6 h-18 rounded-r-lg flex items-center justify-center glass-surface text-gray-700 cursor-pointer shadow-md border border-white/40" onClick={()=>setOpen(v=>!v)}>
             <svg viewBox="0 0 20 20" className="w-4 h-4"><path d="M12 4l-6 6 6 6" fill="none" stroke="currentColor" strokeWidth="2"/></svg>
           </div>
         </div>
@@ -860,7 +549,7 @@
       const hasTeams = teams && teams.length>0;
       return (
         <div className="flex items-center gap-2">
-          <select className={`border rounded px-3 py-1.5 ${disabled?'bg-gray-100 cursor-not-allowed':''}`} value={hasTeams? value : ''}
+          <select className={`border rounded-lg px-3 py-1.5 shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 ${disabled?'bg-gray-100 cursor-not-allowed':''}`} value={hasTeams? value : ''}
             onChange={e=> onChange(e.target.value)} disabled={disabled || !hasTeams}>
             {hasTeams ? teams.map(team=> <option key={team.id} value={team.id}>{team.name}</option>) : <option value="">暂无团队</option>}
           </select>
@@ -3388,39 +3077,50 @@
       );
 
       const Topbar = (
-        <div className="sticky top-0 z-30 bg-gradient-to-b from-white/90 to-white/60 backdrop-blur border-b">
-          <div className="max-w-[1400px] mx-auto px-4 py-3 flex items-center gap-3">
-            <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
-            <div className="flex-1"></div>
-            <div className="flex lg:hidden items-center gap-2 text-sm mr-2">
-              <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
+        <div className="sticky top-0 z-30 pt-4 pb-2 backdrop-blur-sm">
+          <div className="max-w-[1400px] mx-auto px-4 space-y-2">
+            <div className="glass-surface rounded-2xl px-4 py-3 flex items-center gap-3 border border-white/50 shadow-lg">
+              <h1 className="text-xl font-bold text-indigo-600 tracking-tight">排班助手（测试版）</h1>
+              <div className="flex-1" />
+              <div className="flex lg:hidden items-center gap-2 text-sm mr-2">
+                <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
+              </div>
+              <div className="hidden lg:flex items-center gap-2 text-sm">
+                <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
+                <input type="date" className={`border rounded-lg px-3 py-1.5 shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={start} onChange={e=>setStart(e.target.value)} disabled={editingLocked} />
+                <span className="text-gray-400">—</span>
+                <input type="date" className={`border rounded-lg px-3 py-1.5 shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={end} onChange={e=>setEnd(e.target.value)} disabled={editingLocked} />
+              </div>
+              <div className="flex items-center gap-2">
+                <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked}>导出</PillBtn>
+                <button onClick={()=> clearRange('empty')} className={`px-3 py-1.5 rounded-full text-sm transition ${editingLocked?'bg-gray-200 cursor-not-allowed text-gray-500':'bg-amber-100 hover:bg-amber-200 text-amber-700 shadow-sm'}`} disabled={editingLocked}>清空当前范围</button>
+                {user ? (
+                  <button onClick={async()=>{ await apiPost('/logout',{}).catch(()=>{}); setUser(null); }} className={`px-3 py-1.5 rounded-full text-sm transition ${editingLocked?'bg-gray-200 cursor-not-allowed text-gray-500':'bg-slate-200 hover:bg-slate-300 text-gray-700 shadow-sm'}`} disabled={editingLocked}>退出</button>
+                ) : (
+                  <span className="text-xs text-gray-500">未登录</span>
+                )}
+              </div>
             </div>
-            <div className="hidden lg:flex items-center gap-2 text-sm">
-              <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
-              <input type="date" className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={start} onChange={e=>setStart(e.target.value)} disabled={editingLocked} />
-              <span className="text-gray-400">—</span>
-              <input type="date" className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={end} onChange={e=>setEnd(e.target.value)} disabled={editingLocked} />
-            </div>
-            <div className="flex items-center gap-2">
-              <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked}>导出</PillBtn>
-              <button onClick={()=> clearRange('empty')} className={`px-3 py-1.5 rounded-full text-sm ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-amber-100 hover:bg-amber-200'}`} disabled={editingLocked}>清空当前范围</button>
-              {user ? (<button onClick={async()=>{ await apiPost('/logout',{}).catch(()=>{}); setUser(null); }} className={`px-3 py-1.5 rounded-full text-sm ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={editingLocked}>退出</button>) : (<span className="text-xs text-gray-500">未登录</span>)}
-            </div>
+            {Object.keys(nightIssues).length>0 && (
+              <div className="glass-surface rounded-2xl px-4 py-2 text-sm text-rose-600 border border-rose-100/70 shadow-sm">
+                夜班窗口缺：{Object.entries(nightIssues).slice(0,10).map(([k,v])=>`${k}${v==='缺夜&中2'?'(缺夜&中2)':v==='缺夜'?'(缺夜)':'(缺中2)'}`).join('，')}{Object.keys(nightIssues).length>10?' …':''}
+              </div>
+            )}
           </div>
-          {Object.keys(nightIssues).length>0 && (
-            <div className="max-w-[1400px] mx-auto px-4 pb-2 text-sm text-red-600">夜班窗口缺：{Object.entries(nightIssues).slice(0,10).map(([k,v])=>`${k}${v==='缺夜&中2'?'(缺夜&中2)':v==='缺夜'?'(缺夜)':'(缺中2)'}`).join('，')}{Object.keys(nightIssues).length>10?' …':''}</div>
-          )}
         </div>
       );
 
       const content = ({ grid: ViewGrid, batch: ViewBatch, album: ViewAlbum, users: ViewEmployees, stats: ViewStats, history: ViewHistory, settings: ViewSettings, roles: ViewRoles }[tab]) || ViewBatch;
 
       return (
-        <div className="min-h-screen">
+        <div className="min-h-screen pb-12">
           {Topbar}
-          <div className="max-w-[1400px] mx-auto px-4 py-6">
+          <div className="max-w-[1400px] mx-auto px-4 py-6 flex flex-col gap-6 lg:flex-row">
             <SideDock tab={tab} setTab={setTab} menuPerms={menuPerms}/>
-            <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.3</footer></main>
+            <main className="flex-1 glass-surface rounded-3xl p-6 animate-fade-in border border-white/50 shadow-xl">
+              {content}
+              <footer className="text-center text-xs text-gray-400 pt-8">© 排班助手（测试版） v2.3</footer>
+            </main>
           </div>
 
           {toast && (
