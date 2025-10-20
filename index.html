@@ -345,6 +345,8 @@
       return {
         start: rangeStart,
         end: rangeEnd,
+        viewStart: rangeStart,
+        viewEnd: rangeEnd,
         employees: [],
         data: {},
         versionId: null,
@@ -678,8 +680,11 @@
 
       const [team, setTeam] = useState(()=> (orgConfig.teams?.[0]?.id || 'default'));
       const [note, setNote] = useState('');
-      const [start, setStart] = useState(defaultStart);
-      const [end, setEnd]     = useState(defaultEnd);
+      const [planStart, setPlanStart] = useState(defaultStart);
+      const [planEnd, setPlanEnd]     = useState(defaultEnd);
+      const [viewStart, setViewStart] = useState(defaultStart);
+      const [viewEnd, setViewEnd]     = useState(defaultEnd);
+      const viewManuallyAdjustedRef = useRef(false);
       const [employees, setEmployees] = useState([]);
       const [data, setData] = useState({});
       const [versionId, setVersionId] = useState(null);
@@ -724,6 +729,12 @@
       const [albumHistory, setAlbumHistory] = useState([]);
       const [accountPasswordDrafts, setAccountPasswordDrafts] = useState({});
 
+      useEffect(()=>{
+        if(viewManuallyAdjustedRef.current) return;
+        setViewStart(planStart);
+        setViewEnd(planEnd);
+      }, [planStart, planEnd]);
+
       const [shiftColors, setShiftColors] = useState({ ...defaultShiftColors });
       const [staffingAlerts, setStaffingAlerts] = useState(()=> normalizeStaffingAlerts());
       const [adminDays, setAdminDays] = useState(0);
@@ -754,8 +765,13 @@
         const fallback = createEmptyTeamState(defaultStart, defaultEnd);
         const merged = base ? { ...fallback, ...base } : fallback;
         skipSaveRef.current = true;
-        setStart(merged.start || defaultStart);
-        setEnd(merged.end || defaultEnd);
+        const nextPlanStart = merged.start || defaultStart;
+        const nextPlanEnd = merged.end || defaultEnd;
+        setPlanStart(nextPlanStart);
+        setPlanEnd(nextPlanEnd);
+        viewManuallyAdjustedRef.current = false;
+        setViewStart(merged.viewStart || nextPlanStart);
+        setViewEnd(merged.viewEnd || nextPlanEnd);
         setEmployees(Array.isArray(merged.employees) ? merged.employees : []);
         setData(merged.data || {});
         setVersionId(merged.versionId || null);
@@ -763,8 +779,8 @@
         setStaffingAlerts(normalizeStaffingAlerts(merged.staffingAlerts));
         setAdminDays(Number(merged.adminDays||0));
         setRestPrefs(sanitizeRestPrefsMap(merged.restPrefs||{}));
-        const wins = Array.isArray(merged.nightWindows) && merged.nightWindows.length ? merged.nightWindows : [{ s: merged.start || defaultStart, e: merged.end || defaultEnd }];
-        setNightWindows(wins.map(w=> ({ s: w.s || defaultStart, e: w.e || defaultEnd })));
+        const wins = Array.isArray(merged.nightWindows) && merged.nightWindows.length ? merged.nightWindows : [{ s: nextPlanStart, e: nextPlanEnd }];
+        setNightWindows(wins.map(w=> ({ s: w.s || nextPlanStart, e: w.e || nextPlanEnd })));
         setNightOverride(merged.nightOverride !== undefined ? !!merged.nightOverride : true);
         setNightRules(normalizeNightRules(merged.nightRules));
         setRMin(typeof merged.rMin === 'number' ? merged.rMin : 0.3);
@@ -778,8 +794,8 @@
         setAlbumSelected(merged.albumSelected || {});
         setAlbumWhiteHour(typeof merged.albumWhiteHour === 'number' ? merged.albumWhiteHour : 0.22);
         setAlbumMidHour(typeof merged.albumMidHour === 'number' ? merged.albumMidHour : 0.06);
-        const startMonth = (merged.albumRangeStartMonth || (merged.start || defaultStart)).slice(0,7);
-        const endMonth = (merged.albumRangeEndMonth || (merged.end || defaultEnd)).slice(0,7);
+        const startMonth = (merged.albumRangeStartMonth || nextPlanStart).slice(0,7);
+        const endMonth = (merged.albumRangeEndMonth || nextPlanEnd).slice(0,7);
         setAlbumRangeStartMonth(startMonth);
         setAlbumRangeEndMonth(endMonth);
         setAlbumMaxDiff(typeof merged.albumMaxDiff === 'number' ? merged.albumMaxDiff : 0.5);
@@ -797,8 +813,10 @@
           return;
         }
         const snapshot = {
-          start,
-          end,
+          start: planStart,
+          end: planEnd,
+          viewStart,
+          viewEnd,
           employees,
           data,
           versionId,
@@ -830,16 +848,16 @@
         };
         skipLoadRef.current = true;
         setTeamStateMap(prev=> ({ ...prev, [team]: snapshot }));
-      }, [team, start, end, employees, data, versionId, shiftColors, staffingAlerts, adminDays, restPrefs, nightWindows, nightOverride, nightRules, rMin, rMax, pMin, pMax, mixMax, note, batchChecked, albumSelected, albumWhiteHour, albumMidHour, albumRangeStartMonth, albumRangeEndMonth, albumMaxDiff, albumAssignments, albumAutoNote, albumHistory, historyProfile, yearlyOptimize]);
+      }, [team, planStart, planEnd, viewStart, viewEnd, employees, data, versionId, shiftColors, staffingAlerts, adminDays, restPrefs, nightWindows, nightOverride, nightRules, rMin, rMax, pMin, pMax, mixMax, note, batchChecked, albumSelected, albumWhiteHour, albumMidHour, albumRangeStartMonth, albumRangeEndMonth, albumMaxDiff, albumAssignments, albumAutoNote, albumHistory, historyProfile, yearlyOptimize]);
 
       const REST_STORE_KEY = 'scheduler_restprefs_store_v2';
       function restStoreKey(team,start,end){ return `${team}__${start}__${end}`; }
       function loadRestStore(){ try{ return JSON.parse(localStorage.getItem(REST_STORE_KEY)||'{}'); }catch{ return {}; } }
       function saveRestStore(map){ try{ localStorage.setItem(REST_STORE_KEY, JSON.stringify(map||{})); }catch{} }
-      function saveRestForView(){ const map = loadRestStore(); map[restStoreKey(team,start,end)] = restPrefs; saveRestStore(map); }
-      function tryRestoreRestForView(){ const map = loadRestStore(); const hit = map[restStoreKey(team,start,end)]; if(hit && Object.keys(hit).length){ setRestPrefs(sanitizeRestPrefsMap(hit)); } }
-      useEffect(()=>{ if(Object.keys(restPrefs||{}).length) saveRestForView(); }, [restPrefs, team, start, end]);
-      useEffect(()=>{ tryRestoreRestForView(); }, [team, start, end]);
+      function saveRestForView(){ const map = loadRestStore(); map[restStoreKey(team,planStart,planEnd)] = restPrefs; saveRestStore(map); }
+      function tryRestoreRestForView(){ const map = loadRestStore(); const hit = map[restStoreKey(team,planStart,planEnd)]; if(hit && Object.keys(hit).length){ setRestPrefs(sanitizeRestPrefsMap(hit)); } }
+      useEffect(()=>{ if(Object.keys(restPrefs||{}).length) saveRestForView(); }, [restPrefs, team, planStart, planEnd]);
+      useEffect(()=>{ tryRestoreRestForView(); }, [team, planStart, planEnd]);
 
       const teamsList = orgConfig.teams || [];
       const accountConfig = useMemo(()=>{
@@ -1061,11 +1079,11 @@
       useEffect(()=>{ lastLoadedVersionRef.current = {}; autoLoadedTeamRef.current = {}; }, [user?.username]);
       const autoLoadKey = useMemo(()=>{
         const safeTeam = team || 'default';
-        const safeStart = (start || '').slice(0,10);
-        const safeEnd = (end || '').slice(0,10);
+        const safeStart = (planStart || '').slice(0,10);
+        const safeEnd = (planEnd || '').slice(0,10);
         const flag = yearlyOptimize ? 'on' : 'off';
         return `${safeTeam}__${flag}__${safeStart}__${safeEnd}`;
-      }, [team, start, end, yearlyOptimize]);
+      }, [team, planStart, planEnd, yearlyOptimize]);
       function applyServerState(payload){
         if(!payload || typeof payload !== 'object') return;
         const get = (...keys)=>{
@@ -1076,10 +1094,17 @@
           }
           return undefined;
         };
-        const viewStart = get('viewStart','view_start','start');
-        const viewEnd = get('viewEnd','view_end','end');
-        if(typeof viewStart === 'string' && viewStart){ setStart(viewStart.slice(0,10)); }
-        if(typeof viewEnd === 'string' && viewEnd){ setEnd(viewEnd.slice(0,10)); }
+        const planStartPayload = get('start');
+        const planEndPayload = get('end');
+        if(typeof planStartPayload === 'string' && planStartPayload){ setPlanStart(planStartPayload.slice(0,10)); }
+        if(typeof planEndPayload === 'string' && planEndPayload){ setPlanEnd(planEndPayload.slice(0,10)); }
+        const viewStartPayload = get('viewStart','view_start');
+        const viewEndPayload = get('viewEnd','view_end');
+        const resolvedPlanStart = (typeof planStartPayload === 'string' && planStartPayload) ? planStartPayload.slice(0,10) : planStart;
+        const resolvedPlanEnd = (typeof planEndPayload === 'string' && planEndPayload) ? planEndPayload.slice(0,10) : planEnd;
+        viewManuallyAdjustedRef.current = false;
+        setViewStart(typeof viewStartPayload === 'string' && viewStartPayload ? viewStartPayload.slice(0,10) : resolvedPlanStart);
+        setViewEnd(typeof viewEndPayload === 'string' && viewEndPayload ? viewEndPayload.slice(0,10) : resolvedPlanEnd);
         const version = get('versionId','version_id');
         if(version){ setVersionId(version); }
         const employeesPayload = get('employees');
@@ -1092,9 +1117,11 @@
         if(nightRulesPayload){ setNightRules(normalizeNightRules(nightRulesPayload)); }
         const nightWindowsPayload = get('nightWindows','night_windows');
         if(Array.isArray(nightWindowsPayload) && nightWindowsPayload.length){
+          const fallbackStart = resolvedPlanStart || planStart;
+          const fallbackEnd = resolvedPlanEnd || planEnd;
           setNightWindows(nightWindowsPayload.map(w=> ({
-            s: typeof w?.s === 'string' ? w.s : (typeof w?.start === 'string' ? w.start : start),
-            e: typeof w?.e === 'string' ? w.e : (typeof w?.end === 'string' ? w.end : end)
+            s: typeof w?.s === 'string' ? w.s : (typeof w?.start === 'string' ? w.start : fallbackStart),
+            e: typeof w?.e === 'string' ? w.e : (typeof w?.end === 'string' ? w.end : fallbackEnd)
           })));
         }
         const nightOverridePayload = get('nightOverride','night_override');
@@ -1162,10 +1189,10 @@
         try {
           const params = new URLSearchParams();
           if(team) params.set('team', team);
-          if(start) params.set('start', start);
-          if(end) params.set('end', end);
+          if(planStart) params.set('start', planStart);
+          if(planEnd) params.set('end', planEnd);
           if(yearlyOptimize){
-            const yrMatch = (start || '').match(/^(\d{4})/);
+            const yrMatch = (planStart || '').match(/^(\d{4})/);
             if(yrMatch){
               params.set('historyYearStart', `${yrMatch[1]}-01-01`);
               params.set('yearOptimize', '1');
@@ -1188,10 +1215,10 @@
           const safeNightRules = normalizeNightRules(nightRules);
           const payload = {
             team,
-            viewStart: start,
-            viewEnd: end,
-            start,
-            end,
+            viewStart,
+            viewEnd,
+            start: planStart,
+            end: planEnd,
             employees,
             data,
             baseVersionId: versionId,
@@ -1316,7 +1343,7 @@
         loadFromServer();
       }, [autoLoadKey, team, user]);
       async function doLogout(){ try{ await apiPost('/logout',{}); setUser(null);}catch{} }
-      function exportExcel(){ const url = `${API_BASE}/export/xlsx?team=${encodeURIComponent(team)}&start=${start}&end=${end}`; window.location.href=url; }
+      function exportExcel(){ const url = `${API_BASE}/export/xlsx?team=${encodeURIComponent(team)}&start=${planStart}&end=${planEnd}`; window.location.href=url; }
 
       useEffect(()=>{
         if(tab === 'history'){
@@ -1324,7 +1351,15 @@
         }
       }, [tab, team]);
 
-      const dateList = useMemo(()=> enumerateDates(start, end), [start,end]);
+      const dateList = useMemo(()=>{
+        const hasView = viewStart && viewEnd;
+        if(hasView){
+          const s = viewStart <= viewEnd ? viewStart : viewEnd;
+          const e = viewStart <= viewEnd ? viewEnd : viewStart;
+          return enumerateDates(s, e);
+        }
+        return enumerateDates(planStart, planEnd);
+      }, [viewStart, viewEnd, planStart, planEnd]);
       const activeCellRef = useRef(null);
       function setCellByIndex(dIndex, eIndex, value){ const d = dateList[dIndex]; const emp = employees[eIndex]; if(!d||!emp) return; setData(prev=>{ const next = { ...prev }; const row = { ...(next[d]||{}) }; row[emp] = value; next[d] = row; return next; }); }
       function onFocusCell(dIndex, eIndex){ activeCellRef.current = { dIndex, eIndex }; }
@@ -1349,7 +1384,7 @@
         return ()=> document.removeEventListener('mousedown', onDocDown);
       }, [picker.open]);
 
-      const gridEmpCounts = useMemo(()=> countByEmpInRange(employees, data, start, end), [employees, data, start, end]);
+      const gridEmpCounts = useMemo(()=> countByEmpInRange(employees, data, planStart, planEnd), [employees, data, planStart, planEnd]);
 
       const ViewGrid = (
         <Section title="排班表格" right={<span className="text-sm text-gray-500">提示：点击单元格→直接输入或从 Excel 粘贴；支持 IME 连续输入 {editingLocked && <span className='inline-flex items-center gap-1 text-rose-600 ml-2'><Icon name='lock'/>执行中：只读</span>}</span>}>
@@ -1514,32 +1549,32 @@
           const prioritizedTargets = sortedByHistory(targets, historyProfile);
 
           setStage('阶段 1/6：拉齐白班（5白+2休）', 10, 100);
-          let cur = buildWhiteFiveTwo({ employees: prioritizedTargets, data, start, end, restPrefs });
+          let cur = buildWhiteFiveTwo({ employees: prioritizedTargets, data, start: planStart, end: planEnd, restPrefs });
           setData(cur); await waitForFrame();
 
           setStage('阶段 2/6：按周期交替错开放中班', 30, 100);
-          cur = applyAlternateByCycle({ employees: prioritizedTargets, data: cur, start, end }, mixMax);
+          cur = applyAlternateByCycle({ employees: prioritizedTargets, data: cur, start: planStart, end: planEnd }, mixMax);
           setData(cur); await waitForFrame();
 
           setStage('阶段 3/6：按天比例收敛', 55, 100);
-          cur = clampDailyByRange({ employees: prioritizedTargets, data: cur, start, end, rMin, rMax, maxRounds: 300, mixMaxRatio: mixMax });
+          cur = clampDailyByRange({ employees: prioritizedTargets, data: cur, start: planStart, end: planEnd, rMin, rMax, maxRounds: 300, mixMaxRatio: mixMax });
           setData(cur); await waitForFrame();
 
           setStage('阶段 4/6：个人比例收敛', 78, 100);
           for(let sweep=0; sweep<8; sweep++){
-            cur = clampDailyByRange({ employees: prioritizedTargets, data: cur, start, end, rMin, rMax, maxRounds: 220, mixMaxRatio: mixMax });
-            cur = clampPersonByRange({ employees: prioritizedTargets, data: cur, start, end, pMin, pMax, maxRounds: 260, mixMaxRatio: mixMax });
+            cur = clampDailyByRange({ employees: prioritizedTargets, data: cur, start: planStart, end: planEnd, rMin, rMax, maxRounds: 220, mixMaxRatio: mixMax });
+            cur = clampPersonByRange({ employees: prioritizedTargets, data: cur, start: planStart, end: planEnd, pMin, pMax, maxRounds: 260, mixMaxRatio: mixMax });
             pushLog(`循环微调：第 ${sweep+1} 轮`);
             if((sweep+1) % 2 === 0) await waitForFrame();
           }
           setData(cur); await waitForFrame();
 
           setStage('阶段 5/6：参考历史与行政天数调整', 92, 100);
-          cur = adjustWithHistory({ data: cur, employees: prioritizedTargets, start, end, adminDays, historyProfile, mixMaxRatio: mixMax, yearlyOptimize });
+          cur = adjustWithHistory({ data: cur, employees: prioritizedTargets, start: planStart, end: planEnd, adminDays, historyProfile, mixMaxRatio: mixMax, yearlyOptimize });
           setData(cur); await waitForFrame();
 
           setStage('阶段 6/6：校验并微调', 98, 100);
-          cur = repairNoMidToWhite({ data: cur, employees: prioritizedTargets, start, end });
+          cur = repairNoMidToWhite({ data: cur, employees: prioritizedTargets, start: planStart, end: planEnd });
           setData(cur);
 
           endStage();
@@ -1547,6 +1582,22 @@
 
         return (
           <div className="rounded-2xl border border-indigo-100/60 bg-white/80 backdrop-blur-sm p-4 space-y-3 shadow-sm transition-transform duration-300 hover:-translate-y-1 hover:shadow-xl">
+            <div className="space-y-2">
+              <div className="font-medium text-gray-700">自动排班日期范围</div>
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <label className="inline-flex items-center gap-2">开始
+                  <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planStart}
+                    onChange={e=> setPlanStart(e.target.value)} disabled={editingLocked} />
+                </label>
+                <span className="text-gray-400">—</span>
+                <label className="inline-flex items-center gap-2">结束
+                  <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planEnd}
+                    onChange={e=> setPlanEnd(e.target.value)} disabled={editingLocked} />
+                </label>
+                <span className="text-xs text-gray-400">顶部日期仅用于筛选视图</span>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
               <div className="space-y-2">
                 <div className="font-medium text-gray-700">每日比例（中1:白）</div>
@@ -1599,7 +1650,7 @@
                   <button className="px-2 py-1 border rounded" onClick={()=> setNightWindows(arr=> arr.filter((_,idx)=> idx!==i))}>删除</button>
                 </div>
               ))}
-              <button className="px-3 py-1.5 border rounded" onClick={()=> setNightWindows(a=> [...a, {s:start,e:end}])}>新增一段</button>
+              <button className="px-3 py-1.5 border rounded" onClick={()=> setNightWindows(a=> [...a, {s:planStart,e:planEnd}])}>新增一段</button>
             </div>
 
             <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
@@ -1641,11 +1692,11 @@
         let s = spanStart.start;
         let e = spanEnd.end;
         if(s > e){ const tmp = s; s = spanEnd.start; e = spanStart.end; }
-        const clipStart = s < start ? start : s;
-        const clipEnd = e > end ? end : e;
+        const clipStart = s < planStart ? planStart : s;
+        const clipEnd = e > planEnd ? planEnd : e;
         if(clipStart > clipEnd) return null;
         return { start: clipStart, end: clipEnd };
-      }, [albumRangeStartMonth, albumRangeEndMonth, start, end]);
+      }, [albumRangeStartMonth, albumRangeEndMonth, planStart, planEnd]);
       const albumDates = useMemo(()=> albumRange? enumerateDates(albumRange.start, albumRange.end) : [], [albumRange]);
 
       useEffect(()=>{
@@ -2141,11 +2192,15 @@
       );
 
       function periodRanges(){
-        const dS=new Date(start);
+        const baseStart = viewStart || planStart;
+        const baseEnd = viewEnd || planEnd;
+        const orderedStart = baseStart <= baseEnd ? baseStart : baseEnd;
+        const orderedEnd = baseStart <= baseEnd ? baseEnd : baseStart;
+        const dS=new Date(orderedStart);
         const yS = fmt(new Date(dS.getFullYear(),0,1)); const yE = fmt(new Date(dS.getFullYear(),11,31));
         const q = Math.floor(dS.getMonth()/3); const qS = fmt(new Date(dS.getFullYear(), q*3, 1)); const qE = fmt(new Date(dS.getFullYear(), q*3+3, 0));
         const mS = fmt(new Date(dS.getFullYear(), dS.getMonth(), 1)); const mE = fmt(new Date(dS.getFullYear(), dS.getMonth()+1, 0));
-        return { y:{s:yS,e:yE}, q:{s:qS,e:qE}, m:{s:mS,e:mE}, r:{s:start,e:end} };
+        return { y:{s:yS,e:yE}, q:{s:qS,e:qE}, m:{s:mS,e:mE}, r:{s:orderedStart,e:orderedEnd} };
       }
       const ViewStats = (()=>{
         const ranges = periodRanges();
@@ -2156,7 +2211,7 @@
         const [albumStatMode, setAlbumStatMode] = useState('analysis');
         const cur = statPeriod==='y'? ranges.y : statPeriod==='q'? ranges.q : statPeriod==='m'? ranges.m : ranges.r;
         const daysLen = useMemo(()=> enumerateDates(cur.s, cur.e).length, [cur.s, cur.e]);
-        const C = useMemo(()=> countByEmpInRange(employees, data, cur.s, cur.e), [employees,data,statPeriod,start,end]);
+        const C = useMemo(()=> countByEmpInRange(employees, data, cur.s, cur.e), [employees, data, cur.s, cur.e]);
         const avg = useMemo(()=>{ const sum={白:0,中1:0,中2:0,夜:0,总:0}; for(const e of employees){ sum.白+=C[e]?.白||0; sum.中1+=C[e]?.中1||0; sum.中2+=C[e]?.中2||0; sum.夜+=C[e]?.夜||0; sum.总+=C[e]?.总||0; } const n = Math.max(1, employees.length); return { 白:(sum.白/n).toFixed(1), 中1:(sum.中1/n).toFixed(1), 中2:(sum.中2/n).toFixed(1), 夜:(sum.夜/n).toFixed(1), 总:(sum.总/n).toFixed(1) }; }, [employees, C]);
 
         // —— 新增：每日分布与总和分析 ——
@@ -2744,7 +2799,7 @@
         </Section>
       );
       const scheduleYearLabel = (()=>{
-        const rawYear = (start || '').slice(0,4);
+        const rawYear = (planStart || '').slice(0,4);
         return /^\d{4}$/.test(rawYear) ? rawYear : String(today.getFullYear());
       })();
       const ViewSettings = (
@@ -2966,13 +3021,12 @@
             </div>
             <div className="hidden lg:flex items-center gap-2 text-sm">
               <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
-              <input type="date" className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={start} onChange={e=>setStart(e.target.value)} disabled={editingLocked} />
+              <input type="date" className="border rounded px-3 py-1.5" value={viewStart} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewStart(e.target.value); }} />
               <span className="text-gray-400">—</span>
-              <input type="date" className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={end} onChange={e=>setEnd(e.target.value)} disabled={editingLocked} />
+              <input type="date" className="border rounded px-3 py-1.5" value={viewEnd} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewEnd(e.target.value); }} />
             </div>
             <div className="flex items-center gap-2">
               <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked}>导出</PillBtn>
-              <button onClick={()=> clearRange('empty')} className={`px-3 py-1.5 rounded-full text-sm ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-amber-100 hover:bg-amber-200'}`} disabled={editingLocked}>清空当前范围</button>
               {user ? (<button onClick={async()=>{ await apiPost('/logout',{}).catch(()=>{}); setUser(null); }} className={`px-3 py-1.5 rounded-full text-sm ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={editingLocked}>退出</button>) : (<span className="text-xs text-gray-500">未登录</span>)}
             </div>
           </div>
