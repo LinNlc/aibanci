@@ -9,6 +9,13 @@ ini_set('display_errors', '0');
 error_reporting(E_ALL);
 date_default_timezone_set('Asia/Shanghai');
 
+if (!defined('ADMIN_LOGIN_USERNAME')) {
+  define('ADMIN_LOGIN_USERNAME', 'admin');
+}
+if (!defined('ADMIN_LOGIN_PASSWORD')) {
+  define('ADMIN_LOGIN_PASSWORD', '19971109');
+}
+
 // ===== SQLite 连接 & 初始化 =====
 $legacyDbFile = '/opt/1panel/apps/openresty/openresty/www/sites/xn--wyuz77ayygl2b/index/api/data/data.sqlite';
 $defaultDbDir = __DIR__ . '/data';
@@ -467,10 +474,19 @@ switch (true) {
 
   // 无登录版：占位，保证前端兼容
   case $method === 'GET' && $path === '/me':
-    send_json(['user' => ['username' => 'admin', 'display_name' => '管理员']]);
+    send_json(['user' => ['username' => ADMIN_LOGIN_USERNAME, 'display_name' => '超级管理员']]);
 
   case $method === 'POST' && $path === '/login':
-    send_json(['ok' => true, 'user' => ['username' => 'admin', 'display_name' => '管理员']]);
+    $in = json_input();
+    $username = trim((string)($in['username'] ?? ''));
+    $password = (string)($in['password'] ?? '');
+    if ($username !== ADMIN_LOGIN_USERNAME) {
+      send_error('账号不存在', 404);
+    }
+    if ($password !== ADMIN_LOGIN_PASSWORD) {
+      send_error('账号或密码错误', 401);
+    }
+    send_json(['ok' => true, 'user' => ['username' => ADMIN_LOGIN_USERNAME, 'display_name' => '超级管理员', 'role' => 'super']]);
 
   case $method === 'POST' && $path === '/logout':
     send_json(['ok' => true]);
@@ -882,34 +898,6 @@ switch (true) {
       $rows[] = $rowVals;
     }
     send_schedule_export($header, $rows, '排班_' . $start . '_' . $end);
-
-  case $method === 'POST' && $path === '/import/xlsx':
-    if (empty($_FILES['file'])) {
-      send_error('请上传 Excel/CSV 文件', 400);
-    }
-    $file = $_FILES['file'];
-    $error = $file['error'] ?? UPLOAD_ERR_OK;
-    if ($error !== UPLOAD_ERR_OK) {
-      send_error('文件上传失败', 400, ['code' => $error]);
-    }
-    $tmpName = $file['tmp_name'] ?? '';
-    if (!$tmpName || !is_file($tmpName)) {
-      send_error('文件上传失败', 400);
-    }
-    try {
-      $rows = read_schedule_rows($tmpName);
-      [$employees, $data, $start, $end] = parse_schedule_from_rows($rows);
-    } catch (Throwable $e) {
-      send_error($e->getMessage() ?: '导入失败', 400);
-    }
-    send_json([
-      'ok' => true,
-      'employees' => $employees,
-      'data' => $data,
-      'start' => $start,
-      'end' => $end,
-      'message' => '导入成功',
-    ]);
 
   case $method === 'POST' && $path === '/import/xlsx':
     if (empty($_FILES['file'])) {

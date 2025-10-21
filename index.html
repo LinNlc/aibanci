@@ -261,6 +261,32 @@
       if(!hash) return raw === '';
       return hash === hashPassword(raw);
     }
+    function encodeCredential(raw){
+      if(typeof raw !== 'string') return '';
+      try {
+        return btoa(unescape(encodeURIComponent(raw)));
+      } catch {
+        return raw;
+      }
+    }
+    function decodeCredential(raw){
+      if(typeof raw !== 'string') return '';
+      try {
+        return decodeURIComponent(escape(atob(raw)));
+      } catch {
+        try {
+          return atob(raw);
+        } catch {
+          return typeof raw === 'string' ? raw : '';
+        }
+      }
+    }
+    const ADMIN_USERNAME = 'admin';
+    const ADMIN_DISPLAY_NAME = '超级管理员';
+    const ADMIN_DEFAULT_PASSWORD = '19971109';
+    const ADMIN_PASSWORD_HASH = hashPassword(ADMIN_DEFAULT_PASSWORD);
+    const LOGIN_STORAGE_KEY = 'scheduler_login_cache_v1';
+    const LOGIN_STORAGE_TTL = 30 * 24 * 60 * 60 * 1000;
     function defaultMenuPerms(overrides){
       const base = {};
       MENU_KEYS.forEach(key=>{ base[key] = { visible:true, editable:true }; });
@@ -318,10 +344,10 @@
         ],
         accounts: [
           {
-            username:'admin',
-            displayName:'超级管理员',
+            username: ADMIN_USERNAME,
+            displayName: ADMIN_DISPLAY_NAME,
             role:'super',
-            passwordHash:'',
+            passwordHash: ADMIN_PASSWORD_HASH,
             menus: defaultMenuPerms({ roles:{ visible:true } }),
             teamAccess:['*']
           }
@@ -358,10 +384,10 @@
       }
       const adminMenus = defaultMenuPerms({ roles:{ visible:true } });
       const adminAccount = {
-        username:'admin',
-        displayName:'超级管理员',
+        username: ADMIN_USERNAME,
+        displayName: ADMIN_DISPLAY_NAME,
         role:'super',
-        passwordHash:'',
+        passwordHash: ADMIN_PASSWORD_HASH,
         menus: adminMenus,
         teamAccess:['*']
       };
@@ -528,25 +554,82 @@
     }
 
     function LoginModal({onSuccess, accounts}){
-      const [username, setUsername] = useState('admin');
-      const [password, setPassword] = useState('admin');
+      const [username, setUsername] = useState('');
+      const [password, setPassword] = useState('');
+      const [remember, setRemember] = useState(false);
       const [err, setErr] = useState('');
       const [loading, setLoading] = useState(false);
+      useEffect(()=>{
+        try{
+          const raw = localStorage.getItem(LOGIN_STORAGE_KEY);
+          if(!raw) return;
+          const parsed = JSON.parse(raw);
+          if(parsed && typeof parsed === 'object'){
+            const expiresAt = typeof parsed.expiresAt === 'number' ? parsed.expiresAt : 0;
+            if(expiresAt && expiresAt > Date.now()){
+              const savedUsername = typeof parsed.username === 'string' ? parsed.username : '';
+              const savedPassword = decodeCredential(parsed.password || '');
+              setUsername(savedUsername);
+              setPassword(savedPassword);
+              setRemember(true);
+            } else {
+              localStorage.removeItem(LOGIN_STORAGE_KEY);
+            }
+          }
+        }catch{}
+      }, []);
+      const persistLogin = (shouldRemember, nextUsername, nextPassword)=>{
+        try{
+          if(shouldRemember && nextUsername && nextPassword){
+            const payload = {
+              username: nextUsername,
+              password: encodeCredential(nextPassword),
+              expiresAt: Date.now() + LOGIN_STORAGE_TTL
+            };
+            localStorage.setItem(LOGIN_STORAGE_KEY, JSON.stringify(payload));
+          } else {
+            localStorage.removeItem(LOGIN_STORAGE_KEY);
+          }
+        }catch{}
+      };
       async function doLogin(e){
         e.preventDefault();
         setErr('');
-        const accountEntry = Array.isArray(accounts) ? accounts.find(acc=> acc.username === username) : null;
-        if(accountEntry && username !== 'admin'){
+        const trimmedUsername = username.trim();
+        if(!trimmedUsername || !password){
+          setErr('请输入账号和密码');
+          return;
+        }
+        if(trimmedUsername !== username){
+          setUsername(trimmedUsername);
+        }
+        const accountEntry = Array.isArray(accounts) ? accounts.find(acc=> acc.username === trimmedUsername) : null;
+        if(accountEntry){
           if(!verifyPassword(accountEntry.passwordHash, password)){
             setErr('密码错误');
             return;
           }
+          if(trimmedUsername === ADMIN_USERNAME){
+            try{
+              setLoading(true);
+              const res = await apiPost('/login', { username: trimmedUsername, password });
+              persistLogin(remember, trimmedUsername, password);
+              onSuccess({ ...res.user, localAccount: false });
+            } catch(ex){
+              setErr(ex.message||'登录失败');
+            } finally {
+              setLoading(false);
+            }
+            return;
+          }
+          persistLogin(remember, trimmedUsername, password);
           onSuccess({ username: accountEntry.username, display_name: accountEntry.displayName || accountEntry.username, role: accountEntry.role, localAccount: true });
           return;
         }
         try{
           setLoading(true);
-          const res = await apiPost('/login', { username, password });
+          const res = await apiPost('/login', { username: trimmedUsername, password });
+          persistLogin(remember, trimmedUsername, password);
           onSuccess(res.user);
         } catch(ex){
           setErr(ex.message||'登录失败');
@@ -575,6 +658,12 @@
                   onCompositionEnd={(e)=>setPassword(e.target.value)}
                   onChange={e=>setPassword(e.target.value)} />
               </div>
+              <label className="flex items-center gap-2 text-sm text-gray-600">
+                <input type="checkbox" className="rounded border-gray-300" disabled={loading}
+                  checked={remember}
+                  onChange={e=> setRemember(e.target.checked)} />
+                <span>记住账号密码（保存30天）</span>
+              </label>
               {err && <div className="text-sm text-red-600">{err}</div>}
               <button type="submit" disabled={loading} className={`w-full rounded-full text-white py-2 transition flex items-center justify-center gap-2 ${loading?'bg-indigo-400 cursor-not-allowed':'bg-indigo-600 hover:bg-indigo-500'}`}>
                 {loading && <Spinner className="w-4 h-4 text-white" />}
