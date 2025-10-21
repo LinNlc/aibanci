@@ -809,6 +809,12 @@
       const skipLoadRef = useRef(false);
       const initializedRef = useRef(false);
 
+      const snapshotRef = useRef(null);
+      const lastSavedSnapshotRef = useRef('');
+      const pendingAutoSaveRef = useRef(false);
+      const autoSaveSendingRef = useRef(false);
+      const initialTeamSyncRef = useRef({});
+
       useEffect(()=>{
         if(skipLoadRef.current){
           skipLoadRef.current = false;
@@ -899,6 +905,26 @@
           historyProfile,
           yearlyOptimize
         };
+        const snapshotForRef = {
+          ...snapshot,
+          employees: Array.isArray(employees) ? employees.slice() : [],
+          shiftColors: { ...shiftColors },
+          staffingAlerts: { ...staffingAlerts },
+          restPrefs: sanitizeRestPrefsMap(restPrefs),
+          nightWindows: Array.isArray(nightWindows) ? nightWindows.map(w=> ({ s: w.s, e: w.e })) : [],
+          batchChecked: batchChecked ? { ...batchChecked } : {},
+          albumSelected: albumSelected ? { ...albumSelected } : {},
+          albumAssignments: albumAssignments ? { ...albumAssignments } : {},
+          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []
+        };
+        snapshotRef.current = snapshotForRef;
+        let serialized = '';
+        try{ serialized = JSON.stringify(snapshotForRef); }catch(e){ serialized = ''; }
+        if(serialized && serialized === lastSavedSnapshotRef.current){
+          pendingAutoSaveRef.current = false;
+        } else {
+          pendingAutoSaveRef.current = snapshotHasMeaningfulData(snapshotForRef) && serialized !== lastSavedSnapshotRef.current;
+        }
         skipLoadRef.current = true;
         setTeamStateMap(prev=> ({ ...prev, [team]: snapshot }));
       }, [team, planStart, planEnd, viewStart, viewEnd, employees, data, versionId, shiftColors, staffingAlerts, adminDays, restPrefs, nightWindows, nightOverride, nightRules, rMin, rMax, pMin, pMax, mixMax, note, batchChecked, albumSelected, albumWhiteHour, albumMidHour, albumRangeStartMonth, albumRangeEndMonth, albumMaxDiff, albumAssignments, albumAutoNote, albumHistory, historyProfile, yearlyOptimize]);
@@ -931,6 +957,50 @@
           setTeam(accessibleTeams[0].id);
         }
       }, [accessibleTeams, team]);
+
+      useEffect(()=>{
+        if(!user) return;
+        const teamsToLoad = accessibleTeams.map(t=> t.id).filter(Boolean);
+        if(!teamsToLoad.length) return;
+        let cancelled = false;
+        (async()=>{
+          for(const teamId of teamsToLoad){
+            if(cancelled) return;
+            if(initialTeamSyncRef.current[teamId]) continue;
+            initialTeamSyncRef.current[teamId] = true;
+            try{
+              const params = new URLSearchParams();
+              params.set('team', teamId);
+              const res = await apiGet(`/schedule?${params.toString()}`);
+              if(cancelled) return;
+              const payload = { ...res, versionId: res.version_id || res.versionId };
+              const version = payload.versionId || null;
+              if(teamId === team){
+                if(pendingAutoSaveRef.current){
+                  initialTeamSyncRef.current[teamId] = false;
+                  continue;
+                }
+                if(version !== null && snapshotRef.current && snapshotRef.current.versionId === version) continue;
+                applyServerState(payload);
+              } else {
+                const otherSnapshot = convertPayloadToTeamState(payload, { start: defaultStart, end: defaultEnd });
+                if(otherSnapshot){
+                  setTeamStateMap(prev=> ({ ...prev, [teamId]: otherSnapshot }));
+                }
+              }
+              if(version){
+                lastLoadedVersionRef.current[teamId] = version;
+              }
+            }catch(e){
+              initialTeamSyncRef.current[teamId] = false;
+              if(!cancelled){
+                console.warn('加载团队最新排班失败', teamId, e);
+              }
+            }
+          }
+        })();
+        return ()=>{ cancelled = true; };
+      }, [user, accessibleTeams, team, defaultStart, defaultEnd]);
 
       const activeTeam = useMemo(()=> teamsList.find(t=> t.id === team) || teamsList[0] || { id: team, name: team, features:{ albumScheduler:true } }, [teamsList, team]);
       const teamFeatures = activeTeam?.features || { albumScheduler:true };
@@ -1130,6 +1200,16 @@
       const lastLoadedVersionRef = useRef({});
       const autoLoadedTeamRef = useRef({});
       useEffect(()=>{ lastLoadedVersionRef.current = {}; autoLoadedTeamRef.current = {}; }, [user?.username]);
+      useEffect(()=>{
+        snapshotRef.current = null;
+        lastSavedSnapshotRef.current = '';
+        pendingAutoSaveRef.current = false;
+        autoSaveSendingRef.current = false;
+        initialTeamSyncRef.current = {};
+        if(user){
+          setTeamStateMap({});
+        }
+      }, [user?.username]);
       const autoLoadKey = useMemo(()=>{
         const safeTeam = team || 'default';
         const safeStart = (planStart || '').slice(0,10);
@@ -1137,8 +1217,30 @@
         const flag = yearlyOptimize ? 'on' : 'off';
         return `${safeTeam}__${flag}__${safeStart}__${safeEnd}`;
       }, [team, planStart, planEnd, yearlyOptimize]);
-      function applyServerState(payload){
-        if(!payload || typeof payload !== 'object') return;
+      function snapshotHasMeaningfulData(snapshot){
+        if(!snapshot || typeof snapshot !== 'object') return false;
+        if(Array.isArray(snapshot.employees) && snapshot.employees.length) return true;
+        if(typeof snapshot.note === 'string' && snapshot.note.trim()) return true;
+        if(Number(snapshot.adminDays||0) > 0) return true;
+        if(snapshot.restPrefs && Object.keys(snapshot.restPrefs).length) return true;
+        if(snapshot.albumAutoNote && snapshot.albumAutoNote.trim()) return true;
+        if(snapshot.albumAssignments && Object.keys(snapshot.albumAssignments).length) return true;
+        if(Array.isArray(snapshot.albumHistory) && snapshot.albumHistory.length) return true;
+        const data = snapshot.data || {};
+        for(const day in data){
+          const row = data[day] || {};
+          for(const emp in row){
+            const val = row[emp];
+            if(val !== undefined && val !== null && String(val).trim() !== ''){
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+
+      function convertPayloadToTeamState(payload, fallback = {}){
+        if(!payload || typeof payload !== 'object') return null;
         const get = (...keys)=>{
           for(const key of keys){
             if(payload[key] !== undefined && payload[key] !== null){
@@ -1147,97 +1249,278 @@
           }
           return undefined;
         };
-        const planStartPayload = get('start');
-        const planEndPayload = get('end');
-        if(typeof planStartPayload === 'string' && planStartPayload){ setPlanStart(planStartPayload.slice(0,10)); }
-        if(typeof planEndPayload === 'string' && planEndPayload){ setPlanEnd(planEndPayload.slice(0,10)); }
-        const viewStartPayload = get('viewStart','view_start');
-        const viewEndPayload = get('viewEnd','view_end');
-        const resolvedPlanStart = (typeof planStartPayload === 'string' && planStartPayload) ? planStartPayload.slice(0,10) : planStart;
-        const resolvedPlanEnd = (typeof planEndPayload === 'string' && planEndPayload) ? planEndPayload.slice(0,10) : planEnd;
-        viewManuallyAdjustedRef.current = false;
-        setViewStart(typeof viewStartPayload === 'string' && viewStartPayload ? viewStartPayload.slice(0,10) : resolvedPlanStart);
-        setViewEnd(typeof viewEndPayload === 'string' && viewEndPayload ? viewEndPayload.slice(0,10) : resolvedPlanEnd);
-        const version = get('versionId','version_id');
-        if(version){ setVersionId(version); }
+        const fallbackStart = typeof fallback.start === 'string' && fallback.start ? fallback.start.slice(0,10) : (planStart || defaultStart);
+        const fallbackEnd = typeof fallback.end === 'string' && fallback.end ? fallback.end.slice(0,10) : (planEnd || defaultEnd);
+        const startRaw = get('start','planStart','viewStart','view_start');
+        const endRaw = get('end','planEnd','viewEnd','view_end');
+        const resolvedStart = typeof startRaw === 'string' && startRaw ? startRaw.slice(0,10) : fallbackStart.slice(0,10);
+        const resolvedEnd = typeof endRaw === 'string' && endRaw ? endRaw.slice(0,10) : fallbackEnd.slice(0,10);
+        const viewStartRaw = get('viewStart','view_start');
+        const viewEndRaw = get('viewEnd','view_end');
+        const resolvedViewStart = typeof viewStartRaw === 'string' && viewStartRaw ? viewStartRaw.slice(0,10) : resolvedStart;
+        const resolvedViewEnd = typeof viewEndRaw === 'string' && viewEndRaw ? viewEndRaw.slice(0,10) : resolvedEnd;
         const employeesPayload = get('employees');
-        if(Array.isArray(employeesPayload)){ setEmployees(employeesPayload); }
+        const employees = Array.isArray(employeesPayload) ? employeesPayload.map(e=> typeof e === 'string' ? e : String(e)) : [];
         const dataPayload = get('data');
-        if(dataPayload && typeof dataPayload === 'object'){ setData(dataPayload); }
+        const data = (dataPayload && typeof dataPayload === 'object' && !Array.isArray(dataPayload)) ? dataPayload : {};
+        const shiftColorsPayload = get('shiftColors','shift_colors');
+        const shiftColorsState = shiftColorsPayload && typeof shiftColorsPayload === 'object' ? { ...defaultShiftColors, ...shiftColorsPayload } : { ...defaultShiftColors };
+        const staffingPayload = get('staffingAlerts','staffing_alerts');
+        const staffingAlertsState = normalizeStaffingAlerts(staffingPayload);
+        const adminDaysVal = Number(get('adminDays','admin_days') || 0);
         const restPayload = get('restPrefs','rest_prefs');
-        if(restPayload){ setRestPrefs(sanitizeRestPrefsMap(restPayload)); }
-        const nightRulesPayload = get('nightRules','night_rules');
-        if(nightRulesPayload){ setNightRules(normalizeNightRules(nightRulesPayload)); }
+        const restPrefsState = sanitizeRestPrefsMap(restPayload || {});
         const nightWindowsPayload = get('nightWindows','night_windows');
+        let nightWindowsState = [{ s: resolvedStart, e: resolvedEnd }];
         if(Array.isArray(nightWindowsPayload) && nightWindowsPayload.length){
-          const fallbackStart = resolvedPlanStart || planStart;
-          const fallbackEnd = resolvedPlanEnd || planEnd;
-          setNightWindows(nightWindowsPayload.map(w=> ({
-            s: typeof w?.s === 'string' ? w.s : (typeof w?.start === 'string' ? w.start : fallbackStart),
-            e: typeof w?.e === 'string' ? w.e : (typeof w?.end === 'string' ? w.end : fallbackEnd)
-          })));
+          nightWindowsState = nightWindowsPayload.map(w=> ({
+            s: typeof w?.s === 'string' && w.s ? w.s : (typeof w?.start === 'string' ? w.start : resolvedStart),
+            e: typeof w?.e === 'string' && w.e ? w.e : (typeof w?.end === 'string' ? w.end : resolvedEnd)
+          }));
         }
         const nightOverridePayload = get('nightOverride','night_override');
-        if(typeof nightOverridePayload === 'boolean'){ setNightOverride(nightOverridePayload); }
-        const adminDaysPayload = get('adminDays','admin_days');
-        if(typeof adminDaysPayload === 'number'){ setAdminDays(adminDaysPayload); }
-        const shiftPayload = get('shiftColors','shift_colors');
-        if(shiftPayload && typeof shiftPayload === 'object'){
-          setShiftColors(prev=> ({ ...defaultShiftColors, ...prev, ...shiftPayload }));
-        }
-        const staffingPayload = get('staffingAlerts','staffing_alerts');
-        if(staffingPayload){
-          setStaffingAlerts(normalizeStaffingAlerts(staffingPayload));
-        }
-        const notePayload = get('note','remark');
-        if(typeof notePayload === 'string'){ setNote(notePayload); }
+        const nightRulesPayload = get('nightRules','night_rules');
         const rMinPayload = get('rMin','r_min');
-        if(typeof rMinPayload === 'number'){ setRMin(rMinPayload); }
         const rMaxPayload = get('rMax','r_max');
-        if(typeof rMaxPayload === 'number'){ setRMax(rMaxPayload); }
         const pMinPayload = get('pMin','p_min');
-        if(typeof pMinPayload === 'number'){ setPMin(pMinPayload); }
         const pMaxPayload = get('pMax','p_max');
-        if(typeof pMaxPayload === 'number'){ setPMax(pMaxPayload); }
         const mixMaxPayload = get('mixMax','mix_max');
-        if(typeof mixMaxPayload === 'number'){ setMixMax(mixMaxPayload); }
+        const notePayload = get('note','remark');
         const batchPayload = get('batchChecked','batch_checked');
-        if(batchPayload && typeof batchPayload === 'object'){ setBatchChecked({ ...batchPayload }); }
         const albumSelectedPayload = get('albumSelected','album_selected');
-        if(albumSelectedPayload && typeof albumSelectedPayload === 'object'){ setAlbumSelected({ ...albumSelectedPayload }); }
         const albumWhitePayload = get('albumWhiteHour','album_white_hour');
-        if(typeof albumWhitePayload === 'number'){ setAlbumWhiteHour(albumWhitePayload); }
         const albumMidPayload = get('albumMidHour','album_mid_hour');
-        if(typeof albumMidPayload === 'number'){ setAlbumMidHour(albumMidPayload); }
         const albumRangeStartPayload = get('albumRangeStartMonth','album_range_start_month');
-        if(typeof albumRangeStartPayload === 'string'){ setAlbumRangeStartMonth(albumRangeStartPayload); }
         const albumRangeEndPayload = get('albumRangeEndMonth','album_range_end_month');
-        if(typeof albumRangeEndPayload === 'string'){ setAlbumRangeEndMonth(albumRangeEndPayload); }
         const albumMaxDiffPayload = get('albumMaxDiff','album_max_diff');
-        if(typeof albumMaxDiffPayload === 'number'){ setAlbumMaxDiff(albumMaxDiffPayload); }
         const albumAssignmentsPayload = get('albumAssignments','album_assignments');
-        if(albumAssignmentsPayload && typeof albumAssignmentsPayload === 'object'){
-          try{
-            setAlbumAssignments(JSON.parse(JSON.stringify(albumAssignmentsPayload)));
-          }catch{
-            setAlbumAssignments({ ...albumAssignmentsPayload });
-          }
-        }
         const albumAutoNotePayload = get('albumAutoNote','album_auto_note');
-        if(typeof albumAutoNotePayload === 'string'){ setAlbumAutoNote(albumAutoNotePayload); }
         const albumHistoryPayload = get('albumHistory','album_history');
-        if(Array.isArray(albumHistoryPayload)){
-          setAlbumHistory(albumHistoryPayload.map(item=> ({ ...item, assignments: item?.assignments || {} })));
-        }
-        const historyPayload = get('historyProfile','history_profile');
-        if(historyPayload){ setHistoryProfile(historyPayload); }
+        const historyProfilePayload = get('historyProfile','history_profile');
         const yearlyOptimizePayload = get('yearlyOptimize','year_optimize');
-        if(yearlyOptimizePayload !== undefined){
-          const enabled = yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1';
-          setYearlyOptimize(enabled);
-        }
-        tryRestoreRestForView();
+        const versionPayload = get('versionId','version_id');
+        return {
+          start: resolvedStart,
+          end: resolvedEnd,
+          viewStart: resolvedViewStart,
+          viewEnd: resolvedViewEnd,
+          employees,
+          data,
+          versionId: versionPayload !== undefined && versionPayload !== null ? versionPayload : null,
+          shiftColors: shiftColorsState,
+          staffingAlerts: staffingAlertsState,
+          adminDays: adminDaysVal,
+          restPrefs: restPrefsState,
+          nightWindows: nightWindowsState,
+          nightOverride: nightOverridePayload !== undefined ? !!nightOverridePayload : true,
+          nightRules: normalizeNightRules(nightRulesPayload),
+          rMin: typeof rMinPayload === 'number' ? rMinPayload : 0.3,
+          rMax: typeof rMaxPayload === 'number' ? rMaxPayload : 0.7,
+          pMin: typeof pMinPayload === 'number' ? pMinPayload : 0.3,
+          pMax: typeof pMaxPayload === 'number' ? pMaxPayload : 0.7,
+          mixMax: typeof mixMaxPayload === 'number' ? mixMaxPayload : 1,
+          note: typeof notePayload === 'string' ? notePayload : '',
+          batchChecked: batchPayload && typeof batchPayload === 'object' ? batchPayload : {},
+          albumSelected: albumSelectedPayload && typeof albumSelectedPayload === 'object' ? albumSelectedPayload : {},
+          albumWhiteHour: typeof albumWhitePayload === 'number' ? albumWhitePayload : 0.22,
+          albumMidHour: typeof albumMidPayload === 'number' ? albumMidPayload : 0.06,
+          albumRangeStartMonth: (typeof albumRangeStartPayload === 'string' && albumRangeStartPayload ? albumRangeStartPayload : resolvedStart).slice(0,7),
+          albumRangeEndMonth: (typeof albumRangeEndPayload === 'string' && albumRangeEndPayload ? albumRangeEndPayload : resolvedEnd).slice(0,7),
+          albumMaxDiff: typeof albumMaxDiffPayload === 'number' ? albumMaxDiffPayload : 0.5,
+          albumAssignments: albumAssignmentsPayload && typeof albumAssignmentsPayload === 'object' ? albumAssignmentsPayload : {},
+          albumAutoNote: typeof albumAutoNotePayload === 'string' ? albumAutoNotePayload : '',
+          albumHistory: Array.isArray(albumHistoryPayload) ? albumHistoryPayload.map(item=> ({ ...item, assignments: item?.assignments || {} })) : [],
+          historyProfile: historyProfilePayload || null,
+          yearlyOptimize: yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1'
+        };
       }
+
+      function applyServerState(payload){
+        if(!payload || typeof payload !== 'object') return;
+        const snapshot = convertPayloadToTeamState(payload, { start: planStart, end: planEnd });
+        if(!snapshot) return;
+        skipSaveRef.current = true;
+        viewManuallyAdjustedRef.current = false;
+        setPlanStart(snapshot.start);
+        setPlanEnd(snapshot.end);
+        setViewStart(snapshot.viewStart);
+        setViewEnd(snapshot.viewEnd);
+        setEmployees(Array.isArray(snapshot.employees) ? snapshot.employees.slice() : []);
+        setData(snapshot.data || {});
+        setVersionId(snapshot.versionId || null);
+        setShiftColors({ ...snapshot.shiftColors });
+        setStaffingAlerts({ ...snapshot.staffingAlerts });
+        setAdminDays(Number(snapshot.adminDays || 0));
+        setRestPrefs(sanitizeRestPrefsMap(snapshot.restPrefs || {}));
+        setNightWindows((snapshot.nightWindows || [{ s: snapshot.start, e: snapshot.end }]).map(w=> ({ s: w.s, e: w.e })));
+        setNightOverride(snapshot.nightOverride !== undefined ? !!snapshot.nightOverride : true);
+        setNightRules(normalizeNightRules(snapshot.nightRules));
+        setRMin(typeof snapshot.rMin === 'number' ? snapshot.rMin : 0.3);
+        setRMax(typeof snapshot.rMax === 'number' ? snapshot.rMax : 0.7);
+        setPMin(typeof snapshot.pMin === 'number' ? snapshot.pMin : 0.3);
+        setPMax(typeof snapshot.pMax === 'number' ? snapshot.pMax : 0.7);
+        setMixMax(typeof snapshot.mixMax === 'number' ? snapshot.mixMax : 1);
+        setNote(typeof snapshot.note === 'string' ? snapshot.note : '');
+        setBatchChecked(snapshot.batchChecked ? { ...snapshot.batchChecked } : {});
+        setAlbumSelected(snapshot.albumSelected ? { ...snapshot.albumSelected } : {});
+        setAlbumWhiteHour(typeof snapshot.albumWhiteHour === 'number' ? snapshot.albumWhiteHour : 0.22);
+        setAlbumMidHour(typeof snapshot.albumMidHour === 'number' ? snapshot.albumMidHour : 0.06);
+        setAlbumRangeStartMonth((snapshot.albumRangeStartMonth || snapshot.start).slice(0,7));
+        setAlbumRangeEndMonth((snapshot.albumRangeEndMonth || snapshot.end).slice(0,7));
+        setAlbumMaxDiff(typeof snapshot.albumMaxDiff === 'number' ? snapshot.albumMaxDiff : 0.5);
+        setAlbumAssignments(snapshot.albumAssignments ? { ...snapshot.albumAssignments } : {});
+        setAlbumAutoNote(typeof snapshot.albumAutoNote === 'string' ? snapshot.albumAutoNote : '');
+        setAlbumHistory(Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []);
+        setHistoryProfile(snapshot.historyProfile || null);
+        setYearlyOptimize(snapshot.yearlyOptimize === true);
+        const snapshotClone = {
+          ...snapshot,
+          employees: Array.isArray(snapshot.employees) ? snapshot.employees.slice() : [],
+          data: snapshot.data || {},
+          shiftColors: { ...snapshot.shiftColors },
+          staffingAlerts: { ...snapshot.staffingAlerts },
+          restPrefs: sanitizeRestPrefsMap(snapshot.restPrefs || {}),
+          nightWindows: (snapshot.nightWindows || []).map(w=> ({ s: w.s, e: w.e })),
+          batchChecked: snapshot.batchChecked ? { ...snapshot.batchChecked } : {},
+          albumSelected: snapshot.albumSelected ? { ...snapshot.albumSelected } : {},
+          albumAssignments: snapshot.albumAssignments ? { ...snapshot.albumAssignments } : {},
+          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []
+        };
+        snapshotRef.current = snapshotClone;
+        lastSavedSnapshotRef.current = JSON.stringify(snapshotClone);
+        pendingAutoSaveRef.current = false;
+      }
+
+      function buildSavePayload(options = {}, snapshot = snapshotRef.current){
+        const base = snapshot || {
+          start: planStart,
+          end: planEnd,
+          viewStart,
+          viewEnd,
+          employees,
+          data,
+          versionId,
+          shiftColors,
+          staffingAlerts,
+          adminDays,
+          restPrefs: sanitizeRestPrefsMap(restPrefs),
+          nightWindows,
+          nightOverride,
+          nightRules,
+          rMin,
+          rMax,
+          pMin,
+          pMax,
+          mixMax,
+          note,
+          batchChecked,
+          albumSelected,
+          albumWhiteHour,
+          albumMidHour,
+          albumRangeStartMonth,
+          albumRangeEndMonth,
+          albumMaxDiff,
+          albumAssignments,
+          albumAutoNote,
+          albumHistory,
+          historyProfile,
+          yearlyOptimize
+        };
+        const noteValue = options.noteOverride !== undefined ? options.noteOverride : (base.note ?? note);
+        return {
+          team,
+          viewStart: base.viewStart || viewStart,
+          viewEnd: base.viewEnd || viewEnd,
+          start: base.start || planStart,
+          end: base.end || planEnd,
+          employees: base.employees || employees,
+          data: base.data || data,
+          baseVersionId: base.versionId ?? versionId,
+          note: noteValue,
+          operator: options.operatorOverride ?? ((user && (user.display_name || user.username)) || '管理员'),
+          adminDays: base.adminDays ?? adminDays,
+          restPrefs: base.restPrefs ?? sanitizeRestPrefsMap(restPrefs),
+          nightRules: base.nightRules ?? normalizeNightRules(nightRules),
+          nightWindows: base.nightWindows ?? nightWindows,
+          nightOverride: base.nightOverride ?? nightOverride,
+          rMin: base.rMin ?? rMin,
+          rMax: base.rMax ?? rMax,
+          pMin: base.pMin ?? pMin,
+          pMax: base.pMax ?? pMax,
+          mixMax: base.mixMax ?? mixMax,
+          shiftColors: base.shiftColors ?? shiftColors,
+          staffingAlerts: base.staffingAlerts ?? staffingAlerts,
+          batchChecked: base.batchChecked ?? batchChecked,
+          albumSelected: base.albumSelected ?? albumSelected,
+          albumWhiteHour: base.albumWhiteHour ?? albumWhiteHour,
+          albumMidHour: base.albumMidHour ?? albumMidHour,
+          albumRangeStartMonth: base.albumRangeStartMonth ?? albumRangeStartMonth,
+          albumRangeEndMonth: base.albumRangeEndMonth ?? albumRangeEndMonth,
+          albumMaxDiff: base.albumMaxDiff ?? albumMaxDiff,
+          albumAssignments: base.albumAssignments ?? albumAssignments,
+          albumAutoNote: base.albumAutoNote ?? albumAutoNote,
+          albumHistory: base.albumHistory ?? albumHistory,
+          historyProfile: base.historyProfile ?? historyProfile,
+          yearlyOptimize: base.yearlyOptimize ?? yearlyOptimize
+        };
+      }
+
+      function triggerAutoSave(reason){
+        if(autoSaveSendingRef.current) return false;
+        if(!pendingAutoSaveRef.current) return false;
+        const snapshot = snapshotRef.current;
+        if(!snapshot || !snapshotHasMeaningfulData(snapshot)) return false;
+        let payload;
+        try{
+          payload = buildSavePayload({
+            operatorOverride: '自动保存',
+            noteOverride: snapshot.note && snapshot.note.trim() ? snapshot.note : '自动保存'
+          }, snapshot);
+        }catch(e){
+          return false;
+        }
+        let body;
+        try{ body = JSON.stringify(payload); } catch(e){ return false; }
+        autoSaveSendingRef.current = true;
+        let sent = false;
+        if(typeof navigator !== 'undefined' && navigator.sendBeacon){
+          try{
+            const blob = new Blob([body], { type:'application/json' });
+            sent = navigator.sendBeacon(`${API_BASE}/schedule/save`, blob);
+          }catch(e){ sent = false; }
+        }
+        if(!sent){
+          try{
+            fetch(`${API_BASE}/schedule/save`, {
+              method:'POST',
+              headers:{ 'Content-Type':'application/json' },
+              body,
+              credentials:'include',
+              keepalive:true
+            }).catch(()=>{});
+          }catch(e){}
+        }
+        try{
+          lastSavedSnapshotRef.current = JSON.stringify(snapshot);
+        }catch(e){
+          lastSavedSnapshotRef.current = body;
+        }
+        pendingAutoSaveRef.current = false;
+        autoSaveSendingRef.current = false;
+        return true;
+      }
+
+      useEffect(()=>{
+        const handleBeforeUnload = ()=>{ try{ triggerAutoSave('beforeunload'); }catch(e){} };
+        const handlePageHide = ()=>{ try{ triggerAutoSave('pagehide'); }catch(e){} };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        window.addEventListener('pagehide', handlePageHide);
+        return ()=>{
+          window.removeEventListener('beforeunload', handleBeforeUnload);
+          window.removeEventListener('pagehide', handlePageHide);
+        };
+      }, []);
+
       async function loadFromServer(){
         try {
           const params = new URLSearchParams();
@@ -1253,10 +1536,14 @@
           }
           const query = params.toString();
           const res = await apiGet(`/schedule?${query}`);
-          applyServerState({ ...res, versionId: res.version_id || res.versionId });
-          const latestVersion = res.version_id || res.versionId;
+          const payload = { ...res, versionId: res.version_id || res.versionId };
+          applyServerState(payload);
+          const latestVersion = payload.versionId;
           if(latestVersion){
             lastLoadedVersionRef.current[team] = latestVersion;
+          }
+          if(team){
+            initialTeamSyncRef.current[team] = true;
           }
         } catch(e){
           globalErr(e.message);
@@ -1264,48 +1551,16 @@
       }
       async function saveToServer(){
         try{
-          const operator = (user && (user.display_name || user.username)) || '管理员';
-          const safeNightRules = normalizeNightRules(nightRules);
-          const payload = {
-            team,
-            viewStart,
-            viewEnd,
-            start: planStart,
-            end: planEnd,
-            employees,
-            data,
-            baseVersionId: versionId,
-            note,
-            operator,
-            adminDays,
-            restPrefs: sanitizeRestPrefsMap(restPrefs),
-            nightRules: safeNightRules,
-            nightWindows,
-            nightOverride,
-            rMin,
-            rMax,
-            pMin,
-            pMax,
-            mixMax,
-            shiftColors,
-            staffingAlerts,
-            batchChecked,
-            albumSelected,
-            albumWhiteHour,
-            albumMidHour,
-            albumRangeStartMonth,
-            albumRangeEndMonth,
-            albumMaxDiff,
-            albumAssignments,
-            albumAutoNote,
-            albumHistory,
-            historyProfile,
-            yearlyOptimize
-          };
+          const payload = buildSavePayload();
           const res = await apiPost('/schedule/save', payload);
-          applyServerState({ ...payload, versionId: res.version_id || res.versionId || versionId });
-          if(res && (res.version_id || res.versionId)){
-            lastLoadedVersionRef.current[team] = res.version_id || res.versionId;
+          const returnedVersion = res && (res.version_id || res.versionId);
+          const nextVersion = returnedVersion || versionId || null;
+          applyServerState({ ...payload, versionId: nextVersion });
+          if(nextVersion){
+            lastLoadedVersionRef.current[team] = nextVersion;
+            if(team){
+              initialTeamSyncRef.current[team] = true;
+            }
           }
           showToast('已保存新版本', 'success');
           if(tab === 'history'){
@@ -1396,7 +1651,65 @@
         loadFromServer();
       }, [autoLoadKey, team, user]);
       async function doLogout(){ try{ await apiPost('/logout',{}); setUser(null);}catch{} }
-      function exportExcel(){ const url = `${API_BASE}/export/xlsx?team=${encodeURIComponent(team)}&start=${planStart}&end=${planEnd}`; window.location.href=url; }
+      async function exportExcel(){
+        if(!team){ alert('请选择团队后再导出'); return; }
+        const start = (viewStart || '').slice(0,10);
+        const end = (viewEnd || '').slice(0,10);
+        if(!start || !end || start > end){ alert('请先设置有效的筛选时间范围'); return; }
+        const dates = enumerateDates(start, end);
+        if(!dates.length){ alert('筛选时间范围无效'); return; }
+        const exportEmployees = Array.isArray(employees) ? employees.slice() : [];
+        const payload = {
+          team,
+          start,
+          end,
+          employees: exportEmployees,
+          data: {}
+        };
+        for(const day of dates){
+          const row = data?.[day] || {};
+          const nextRow = {};
+          exportEmployees.forEach(emp=>{
+            if(row[emp] !== undefined && row[emp] !== null && row[emp] !== ''){
+              nextRow[emp] = row[emp];
+            }
+          });
+          payload.data[day] = nextRow;
+        }
+        try{
+          const res = await fetch(`${API_BASE}/export/xlsx`, {
+            method: 'POST',
+            headers: { 'Content-Type':'application/json' },
+            body: JSON.stringify(payload),
+            credentials: 'include'
+          });
+          if(!res.ok){
+            let msg = '导出失败';
+            try{ const err = await res.json(); if(err?.message) msg = err.message; }catch(e){}
+            throw new Error(msg);
+          }
+          const blob = await res.blob();
+          let filename = `排班_${start}_${end}.xlsx`;
+          const disposition = res.headers.get('Content-Disposition') || '';
+          const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+          if(match){
+            const encoded = match[1] || match[2];
+            if(encoded){
+              try{ filename = decodeURIComponent(encoded.replace(/"/g,'')); }catch(e){ filename = encoded.replace(/"/g,''); }
+            }
+          }
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+        }catch(e){
+          globalErr(e.message || '导出失败');
+        }
+      }
       function downloadTemplate(){ window.location.href = `${API_BASE}/template/xlsx`; }
       function openImportPicker(){ if(editingLocked) return; if(importInputRef.current){ importInputRef.current.click(); } }
       async function importScheduleFile(file){

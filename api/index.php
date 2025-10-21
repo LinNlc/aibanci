@@ -98,6 +98,47 @@ function cn_week(string $ymd): string {
   return ['日','一','二','三','四','五','六'][$w] ?? '';
 }
 
+function send_schedule_export(array $header, array $rows, string $filenameBase): void {
+  $hasSpreadsheet = is_file(__DIR__ . '/vendor/autoload.php');
+  if ($hasSpreadsheet) {
+    require_once __DIR__ . '/vendor/autoload.php';
+    try {
+      $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+      $sheet = $spreadsheet->getActiveSheet();
+      $col = 1;
+      foreach ($header as $value) {
+        $sheet->setCellValueByColumnAndRow($col++, 1, $value);
+      }
+      $rowIndex = 2;
+      foreach ($rows as $rowVals) {
+        $col = 1;
+        foreach ($rowVals as $cell) {
+          $sheet->setCellValueByColumnAndRow($col++, $rowIndex, $cell);
+        }
+        $rowIndex++;
+      }
+      header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      header('Content-Disposition: attachment; filename="' . rawurlencode($filenameBase) . '.xlsx"');
+      $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+      $writer->save('php://output');
+      exit;
+    } catch (\Throwable $e) {
+      // 回退到 CSV
+    }
+  }
+
+  header('Content-Type: text/csv; charset=utf-8');
+  header('Content-Disposition: attachment; filename="' . $filenameBase . '.csv"');
+  $out = fopen('php://output', 'w');
+  fwrite($out, chr(0xEF) . chr(0xBB) . chr(0xBF));
+  fputcsv($out, $header);
+  foreach ($rows as $rowVals) {
+    fputcsv($out, $rowVals);
+  }
+  fclose($out);
+  exit;
+}
+
 function decode_json_assoc(?string $json): array {
   if ($json === null || $json === '') return [];
   $decoded = json_decode($json, true);
@@ -765,7 +806,7 @@ switch (true) {
     fclose($out);
     exit;
 
-  // 导出：优先 XLSX，失败回退 CSV
+  // 导出：优先 XLSX，失败回退 CSV（读取已保存版本）
   case $method === 'GET' && $path === '/export/xlsx':
     $team  = (string)($_GET['team']  ?? 'default');
     $start = (string)($_GET['start'] ?? '');
@@ -773,11 +814,9 @@ switch (true) {
     if (!$team || !$start || !$end) send_error('参数缺失', 400);
 
     $pdo = db();
-    $stmt = $pdo->prepare("
-      SELECT employees, data FROM schedule_versions
+    $stmt = $pdo->prepare("SELECT employees, data FROM schedule_versions
       WHERE team=? AND view_start=? AND view_end=?
-      ORDER BY id DESC LIMIT 1
-    ");
+      ORDER BY id DESC LIMIT 1");
     $stmt->execute([$team, $start, $end]);
     $row = $stmt->fetch();
     $employees = $row ? (json_decode($row['employees'], true) ?: []) : [];
@@ -785,43 +824,92 @@ switch (true) {
 
     $dates = ymd_range($start, $end);
     $header = array_merge(['日期','星期'], $employees);
-
-    $hasSpreadsheet = is_file(__DIR__ . '/vendor/autoload.php');
-    if ($hasSpreadsheet) {
-      require_once __DIR__ . '/vendor/autoload.php';
-      try {
-        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $sheet = $spreadsheet->getActiveSheet();
-        $col = 1;
-        foreach ($header as $h) $sheet->setCellValueByColumnAndRow($col++, 1, $h);
-        $r = 2;
-        foreach ($dates as $d) {
-          $rowVals = [$d, '周'.cn_week($d)];
-          foreach ($employees as $e) $rowVals[] = $data[$d][$e] ?? '';
-          $col = 1;
-          foreach ($rowVals as $v) $sheet->setCellValueByColumnAndRow($col++, $r, $v);
-          $r++;
-        }
-        header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        header('Content-Disposition: attachment; filename="排班_'.$start.'_'.$end.'.xlsx"');
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
-        $writer->save('php://output');
-        exit;
-      } catch (\Throwable $e) { /* 回退 CSV */ }
-    }
-
-    header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename="排班_'.$start.'_'.$end.'.csv"');
-    $out = fopen('php://output', 'w');
-    fwrite($out, chr(0xEF).chr(0xBB).chr(0xBF)); // UTF-8 BOM
-    fputcsv($out, $header);
+    $rows = [];
     foreach ($dates as $d) {
-      $rowVals = [$d, '周'.cn_week($d)];
-      foreach ($employees as $e) $rowVals[] = $data[$d][$e] ?? '';
-      fputcsv($out, $rowVals);
+      $rowVals = [$d, '周' . cn_week($d)];
+      foreach ($employees as $e) {
+        $rowVals[] = $data[$d][$e] ?? '';
+      }
+      $rows[] = $rowVals;
     }
-    fclose($out);
-    exit;
+    send_schedule_export($header, $rows, '排班_' . $start . '_' . $end);
+
+  case $method === 'POST' && $path === '/export/xlsx':
+    $in = json_input();
+    $team  = (string)($in['team'] ?? 'default');
+    $start = (string)($in['start'] ?? '');
+    $end   = (string)($in['end'] ?? '');
+    if (!$team || !$start || !$end) send_error('参数缺失', 400);
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $start) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $end)) {
+      send_error('时间格式错误', 400);
+    }
+    if ($start > $end) {
+      $tmp = $start;
+      $start = $end;
+      $end = $tmp;
+    }
+
+    $employeesInput = $in['employees'] ?? [];
+    $employees = [];
+    if (is_array($employeesInput)) {
+      foreach ($employeesInput as $name) {
+        $trimmed = trim((string)$name);
+        if ($trimmed === '') continue;
+        if (!in_array($trimmed, $employees, true)) {
+          $employees[] = $trimmed;
+        }
+      }
+    }
+
+    $dataInput = $in['data'] ?? [];
+    $data = [];
+    if (is_array($dataInput)) {
+      foreach ($dataInput as $day => $row) {
+        if (!is_string($day) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $day)) continue;
+        if (!is_array($row)) $row = [];
+        $data[$day] = $row;
+      }
+    }
+
+    $dates = ymd_range($start, $end);
+    $header = array_merge(['日期','星期'], $employees);
+    $rows = [];
+    foreach ($dates as $d) {
+      $rowVals = [$d, '周' . cn_week($d)];
+      foreach ($employees as $e) {
+        $rowVals[] = $data[$d][$e] ?? '';
+      }
+      $rows[] = $rowVals;
+    }
+    send_schedule_export($header, $rows, '排班_' . $start . '_' . $end);
+
+  case $method === 'POST' && $path === '/import/xlsx':
+    if (empty($_FILES['file'])) {
+      send_error('请上传 Excel/CSV 文件', 400);
+    }
+    $file = $_FILES['file'];
+    $error = $file['error'] ?? UPLOAD_ERR_OK;
+    if ($error !== UPLOAD_ERR_OK) {
+      send_error('文件上传失败', 400, ['code' => $error]);
+    }
+    $tmpName = $file['tmp_name'] ?? '';
+    if (!$tmpName || !is_file($tmpName)) {
+      send_error('文件上传失败', 400);
+    }
+    try {
+      $rows = read_schedule_rows($tmpName);
+      [$employees, $data, $start, $end] = parse_schedule_from_rows($rows);
+    } catch (Throwable $e) {
+      send_error($e->getMessage() ?: '导入失败', 400);
+    }
+    send_json([
+      'ok' => true,
+      'employees' => $employees,
+      'data' => $data,
+      'start' => $start,
+      'end' => $end,
+      'message' => '导入成功',
+    ]);
 
   case $method === 'POST' && $path === '/import/xlsx':
     if (empty($_FILES['file'])) {
