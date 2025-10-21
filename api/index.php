@@ -911,6 +911,34 @@ switch (true) {
       'message' => '导入成功',
     ]);
 
+  case $method === 'POST' && $path === '/import/xlsx':
+    if (empty($_FILES['file'])) {
+      send_error('请上传 Excel/CSV 文件', 400);
+    }
+    $file = $_FILES['file'];
+    $error = $file['error'] ?? UPLOAD_ERR_OK;
+    if ($error !== UPLOAD_ERR_OK) {
+      send_error('文件上传失败', 400, ['code' => $error]);
+    }
+    $tmpName = $file['tmp_name'] ?? '';
+    if (!$tmpName || !is_file($tmpName)) {
+      send_error('文件上传失败', 400);
+    }
+    try {
+      $rows = read_schedule_rows($tmpName);
+      [$employees, $data, $start, $end] = parse_schedule_from_rows($rows);
+    } catch (Throwable $e) {
+      send_error($e->getMessage() ?: '导入失败', 400);
+    }
+    send_json([
+      'ok' => true,
+      'employees' => $employees,
+      'data' => $data,
+      'start' => $start,
+      'end' => $end,
+      'message' => '导入成功',
+    ]);
+
   default:
     send_error('Not Found', 404);
 }
