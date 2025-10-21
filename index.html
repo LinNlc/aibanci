@@ -36,6 +36,8 @@
     .section-card { background: rgba(255,255,255,.92); border-radius: 1.5rem; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 18px 35px rgba(15,23,42,.08); border: 1px solid rgba(148,163,184,.18); backdrop-filter: blur(12px); transition: transform .35s cubic-bezier(.4,0,.2,1), box-shadow .35s cubic-bezier(.4,0,.2,1); }
     .section-card:hover { transform: translateY(-4px); box-shadow: 0 24px 45px rgba(79,70,229,.18); }
     .dock-panel { will-change: transform; }
+    .layout-shell { width: min(96vw, 1800px); margin-left: auto; margin-right: auto; padding-left: 1.25rem; padding-right: 1.25rem; }
+    @media (max-width: 1024px){ .layout-shell { width: 100vw; padding-left: 1rem; padding-right: 1rem; } }
     @media (prefers-reduced-motion: reduce){
       .animate-fade-in, .floating-progress { animation: none !important; }
       .section-card, .fp-card { transition: none !important; }
@@ -85,6 +87,14 @@
     const today = new Date();
     const SHIFT_TYPES = ['白','中1','中2','夜','休'];
     const SHIFT_WORK_TYPES = ['白','中1','中2','夜'];
+
+    const allowIme = (handler)=>{
+      return (event, ...args)=>{
+        if(!event) return handler(event, ...args);
+        if(event.isComposing || event?.nativeEvent?.isComposing || event?.target?.isComposing) return;
+        return handler(event, ...args);
+      };
+    };
 
     function fmt(d) { return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10); }
     function monthRangeOf(dateObj){ const y = dateObj.getFullYear(); const m = dateObj.getMonth(); const start = new Date(y, m, 1); const end = new Date(y, m + 1, 0); return [fmt(start), fmt(end)]; }
@@ -371,7 +381,18 @@
           const username = acc.username.trim();
           if(!username || username === 'admin') return;
           const menus = normalizeMenuPerms(acc.menus);
-          const access = Array.isArray(acc.teamAccess) && acc.teamAccess.length ? Array.from(new Set(acc.teamAccess.filter(id=> id==='*' || teamIds.has(id)))) : ['*'];
+          let access = ['*'];
+          if(Array.isArray(acc.teamAccess)){
+            const cleaned = acc.teamAccess.filter(id=> id==='*' || teamIds.has(id));
+            const unique = Array.from(new Set(cleaned));
+            if(unique.includes('*')){
+              access = ['*'];
+            } else if(unique.length>0){
+              access = unique;
+            } else if(acc.teamAccess.length === 0){
+              access = [];
+            }
+          }
           accounts.push({
             username,
             displayName: typeof acc.displayName === 'string' ? acc.displayName : '',
@@ -1035,11 +1056,12 @@
       const accessibleTeams = useMemo(()=>{
         if(!user) return teamsList;
         if(!accountConfig) return teamsList;
-        const access = Array.isArray(accountConfig.teamAccess) && accountConfig.teamAccess.length ? accountConfig.teamAccess : ['*'];
+        const access = Array.isArray(accountConfig.teamAccess) ? accountConfig.teamAccess : ['*'];
         if(access.includes('*')) return teamsList;
         const allow = new Set(access);
         const filtered = teamsList.filter(t=> allow.has(t.id));
-        return filtered.length ? filtered : teamsList;
+        if(filtered.length) return filtered;
+        return access.length === 0 ? [] : teamsList;
       }, [teamsList, accountConfig, user]);
       useEffect(()=>{
         if(!accessibleTeams.some(t=> t.id === team) && accessibleTeams.length){
@@ -1263,26 +1285,19 @@
       const setAccountAllTeams = (username, enabled)=>{
         updateAccountConfig(username, acc=> ({ ...acc, teamAccess: enabled ? ['*'] : [] }));
       };
-      const toggleAccountTeam = (username, teamId)=>{
+      const setAccountTeamAccess = (username, teamId, enabled)=>{
         updateAccountConfig(username, acc=>{
-          if(acc.teamAccess && acc.teamAccess.includes('*')){
-            const rest = teamsList.filter(t=> t.id !== teamId).map(t=>t.id);
-            return { ...acc, teamAccess: rest.length ? rest : ['*'] };
-          }
-          const set = new Set(acc.teamAccess||[]);
-          if(set.has(teamId)){
-            if(set.size<=1){
-              alert('至少保留一个团队');
-              return acc;
-            }
-            set.delete(teamId);
+          const allIds = teamsList.map(t=> t.id);
+          let current = acc.teamAccess && acc.teamAccess.includes('*') ? allIds.slice() : Array.from(new Set(acc.teamAccess||[]));
+          if(enabled){
+            if(!current.includes(teamId)) current.push(teamId);
           } else {
-            set.add(teamId);
+            current = current.filter(id=> id!==teamId);
           }
-          if(set.size === teamsList.length){
+          if(current.length >= allIds.length && allIds.length){
             return { ...acc, teamAccess:['*'] };
           }
-          return { ...acc, teamAccess: Array.from(set) };
+          return { ...acc, teamAccess: current };
         });
       };
 
@@ -1891,7 +1906,35 @@
       function setCellByIndex(dIndex, eIndex, value){ const d = dateList[dIndex]; const emp = employees[eIndex]; if(!d||!emp) return; setData(prev=>{ const next = { ...prev }; const row = { ...(next[d]||{}) }; row[emp] = value; next[d] = row; return next; }); }
       function onFocusCell(dIndex, eIndex){ activeCellRef.current = { dIndex, eIndex }; }
       function moveActive(dx, dy){ const cur = activeCellRef.current || { dIndex:0, eIndex:0 }; const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateList.length-1)); const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, employees.length-1)); activeCellRef.current = { dIndex: ni, eIndex: nj }; const id = `cell-${ni}-${nj}`; const el = document.getElementById(id); if(el) el.focus(); }
-      function openPickerAt(di, ei, anchorEl){ if(editingLocked) return; const el = anchorEl || document.getElementById(`cell-${di}-${ei}`); if(!el) return; const rect = el.getBoundingClientRect(); setPicker({ open:true, di, ei, x: rect.left + window.scrollX, y: rect.bottom + window.scrollY + 4 }); }
+      function openPickerAt(di, ei, anchorEl){
+        if(editingLocked) return;
+        const el = anchorEl || document.getElementById(`cell-${di}-${ei}`);
+        if(!el) return;
+        const rect = el.getBoundingClientRect();
+        const margin = 8;
+        const pickerWidth = 176;
+        const pickerHeight = 236;
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+        let left = rect.left;
+        let top = rect.bottom + 6;
+        if(left + pickerWidth > viewportWidth - margin){
+          left = Math.max(margin, viewportWidth - pickerWidth - margin);
+        } else {
+          left = Math.max(margin, left);
+        }
+        let placement = 'down';
+        if(top + pickerHeight > viewportHeight - margin){
+          const above = rect.top - pickerHeight - 6;
+          if(above >= margin){
+            top = above;
+            placement = 'up';
+          } else {
+            top = Math.max(margin, viewportHeight - pickerHeight - margin);
+          }
+        }
+        setPicker({ open:true, di, ei, x:left, y:top, placement });
+      }
       function onKeyDownCell(e, di, ei){ if(e.isComposing) return; if(e.altKey && (e.key==='ArrowDown' || e.key==='Enter')){ e.preventDefault(); openPickerAt(di, ei, e.currentTarget); return; } if(e.key==='Enter'){ e.preventDefault(); moveActive(1,0); } else if(e.key==='ArrowRight'){ e.preventDefault(); moveActive(1,0); } else if(e.key==='ArrowLeft'){ e.preventDefault(); moveActive(-1,0); } else if(e.key==='ArrowDown'){ e.preventDefault(); moveActive(0,1); } else if(e.key==='ArrowUp'){ e.preventDefault(); moveActive(0,-1); } }
 
       function clearRange(mode='empty'){
@@ -1903,7 +1946,7 @@
       const nightIssues = useMemo(()=>{ const issues={}; function inAnyWin(day){ for(const w of nightWindows){ if(!w.s||!w.e) continue; if(day>=w.s && day<=w.e) return true; } return false; } for(const d of dateList){ if(!inAnyWin(d)) continue; const row=data[d]||{}; const vals=Object.values(row); const hasN = vals.includes('夜'); const hasM2 = vals.includes('中2'); let msg=''; if(!hasN && !hasM2) msg='缺夜&中2'; else if(!hasN) msg='缺夜'; else if(!hasM2) msg='缺中2'; if(msg) issues[d]=msg; } return issues; }, [nightWindows, data, dateList]);
 
       // —— 新增：全局单个浮动班次选择器 ——
-      const [picker, setPicker] = useState({ open:false, di:null, ei:null, x:0, y:0 });
+      const [picker, setPicker] = useState({ open:false, di:null, ei:null, x:0, y:0, placement:'down' });
       const pickerRef = useRef(null);
       useEffect(()=>{
         function onDocDown(ev){ if(!picker.open) return; if(pickerRef.current && !pickerRef.current.contains(ev.target)) setPicker(p=>({...p, open:false})); }
@@ -2033,7 +2076,7 @@
                               <span className="cursor-help font-medium text-gray-700">{e}</span>
                               <span className={`badge ${diffCls}`} title="差值=实际总天数-行政班应上天数">{diff>0?`+${diff}`:diff}</span>
                               {tooltip && (
-                                <div className="pointer-events-none absolute left-0 top-full z-30 mt-2 hidden min-w-[220px] max-w-xs rounded-2xl bg-gray-900/95 p-3 text-left text-xs text-white shadow-2xl group-hover:block">
+                                <div className="pointer-events-none absolute top-full right-0 z-30 mt-2 hidden min-w-[220px] max-w-[280px] rounded-2xl bg-gray-900/95 p-3 text-left text-xs text-white shadow-2xl group-hover:block" style={{ maxWidth: 'min(280px, calc(100vw - 48px))' }}>
                                   <div className="text-sm font-semibold text-white/90">{tooltip.year} 年排班</div>
                                   <div className="mt-1 space-y-1">
                                     <div className="flex items-center justify-between"><span>夜班总计</span><span>{tooltip.night} 天</span></div>
@@ -3446,9 +3489,9 @@
             <div>
               <label className="block text-sm text-gray-600 mb-1">保存备注</label>
               <input className="w-full border rounded px-3 py-2" value={note}
-                onCompositionStart={()=>{}}
-                onCompositionEnd={(e)=>{ setNote(e.target.value); }}
-                onChange={e=>setNote(e.target.value)} placeholder="例如：10月第一版"/>
+                onCompositionStart={e=>{ e.target.isComposing = true; }}
+                onCompositionEnd={e=>{ e.target.isComposing = false; setNote(e.target.value); }}
+                onChange={allowIme(e=>setNote(e.target.value))} placeholder="例如：10月第一版"/>
             </div>
             <div className="flex flex-wrap items-end gap-2">
               <PillBtn onClick={saveToServer} color="emerald" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存新版本</PillBtn>
@@ -3537,13 +3580,17 @@
                       <label className="flex flex-col text-sm text-gray-600">
                         <span className="mb-1">团队名称</span>
                         <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={t.name}
-                          onChange={e=> updateTeamField(t.id, 'name', e.target.value)} disabled={editingLocked} />
+                          onCompositionStart={e=>{ e.target.isComposing = true; }}
+                          onCompositionEnd={e=>{ e.target.isComposing = false; updateTeamField(t.id, 'name', e.target.value); }}
+                          onChange={allowIme(e=> updateTeamField(t.id, 'name', e.target.value))} disabled={editingLocked} />
                       </label>
                       <div className="text-xs text-gray-500">ID：{t.id}</div>
                       <label className="flex-1 flex flex-col text-sm text-gray-600 min-w-[200px]">
                         <span className="mb-1">备注</span>
                         <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={t.remark||''}
-                          onChange={e=> updateTeamField(t.id, 'remark', e.target.value)} disabled={editingLocked} />
+                          onCompositionStart={e=>{ e.target.isComposing = true; }}
+                          onCompositionEnd={e=>{ e.target.isComposing = false; updateTeamField(t.id, 'remark', e.target.value); }}
+                          onChange={allowIme(e=> updateTeamField(t.id, 'remark', e.target.value))} disabled={editingLocked} />
                       </label>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-4 text-sm">
@@ -3579,12 +3626,16 @@
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">账号</span>
                           <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.username}
-                            onChange={e=> setAccountUsername(acc.username, e.target.value)} disabled={editingLocked} />
+                            onCompositionStart={e=>{ e.target.isComposing = true; }}
+                            onCompositionEnd={e=>{ e.target.isComposing = false; setAccountUsername(acc.username, e.target.value); }}
+                            onChange={allowIme(e=> setAccountUsername(acc.username, e.target.value))} disabled={editingLocked} />
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">显示名称</span>
                           <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.displayName||''}
-                            onChange={e=> setAccountDisplayName(acc.username, e.target.value)} disabled={editingLocked} />
+                            onCompositionStart={e=>{ e.target.isComposing = true; }}
+                            onCompositionEnd={e=>{ e.target.isComposing = false; setAccountDisplayName(acc.username, e.target.value); }}
+                            onChange={allowIme(e=> setAccountDisplayName(acc.username, e.target.value))} disabled={editingLocked} />
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">角色</span>
@@ -3607,14 +3658,14 @@
                       <div>
                         <div className="text-xs text-gray-500 mb-1">可切换团队</div>
                         <div className="flex flex-wrap gap-3">
-                          <label className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60':''}`}>
+                          <label className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60 cursor-not-allowed':'hover:text-indigo-600'}`}>
                             <input type="checkbox" checked={hasAll} disabled={editingLocked}
                               onChange={e=> setAccountAllTeams(acc.username, e.target.checked)} /> 全部团队
                           </label>
                           {teamsList.map(teamItem=> (
-                            <label key={teamItem.id} className={`inline-flex items-center gap-2 ${hasAll?'opacity-60':''}`}>
-                              <input type="checkbox" disabled={editingLocked || hasAll} checked={hasAll || (acc.teamAccess||[]).includes(teamItem.id)}
-                                onChange={()=> toggleAccountTeam(acc.username, teamItem.id)} /> {teamItem.name}
+                            <label key={teamItem.id} className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60 cursor-not-allowed':'hover:text-indigo-600'}`}>
+                              <input type="checkbox" disabled={editingLocked} checked={hasAll || (acc.teamAccess||[]).includes(teamItem.id)}
+                                onChange={e=> setAccountTeamAccess(acc.username, teamItem.id, e.target.checked)} /> {teamItem.name}
                             </label>
                           ))}
                         </div>
@@ -3657,7 +3708,7 @@
 
       const Topbar = (
         <div className="sticky top-0 z-30 bg-gradient-to-b from-white/90 to-white/60 backdrop-blur border-b">
-          <div className="max-w-[1400px] mx-auto px-4 py-3 flex items-center gap-3">
+          <div className="layout-shell py-3 flex items-center gap-3">
             <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
             <div className="flex-1"></div>
             <div className="flex lg:hidden items-center gap-2 text-sm mr-2">
@@ -3675,7 +3726,7 @@
             </div>
           </div>
           {Object.keys(nightIssues).length>0 && (
-            <div className="max-w-[1400px] mx-auto px-4 pb-2 text-sm text-red-600">夜班窗口缺：{Object.entries(nightIssues).slice(0,10).map(([k,v])=>`${k}${v==='缺夜&中2'?'(缺夜&中2)':v==='缺夜'?'(缺夜)':'(缺中2)'}`).join('，')}{Object.keys(nightIssues).length>10?' …':''}</div>
+            <div className="layout-shell pb-2 text-sm text-red-600">夜班窗口缺：{Object.entries(nightIssues).slice(0,10).map(([k,v])=>`${k}${v==='缺夜&中2'?'(缺夜&中2)':v==='缺夜'?'(缺夜)':'(缺中2)'}`).join('，')}{Object.keys(nightIssues).length>10?' …':''}</div>
           )}
         </div>
       );
@@ -3685,7 +3736,7 @@
       return (
         <div className="min-h-screen">
           {Topbar}
-          <div className="max-w-[1400px] mx-auto px-4 py-6">
+          <div className="layout-shell py-6">
             <SideDock tab={tab} setTab={setTab} menuPerms={menuPerms}/>
             <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.3</footer></main>
           </div>
@@ -3712,7 +3763,7 @@
           )}
           {picker.open && (
             <div className="fixed z-50" style={{ left: picker.x, top: picker.y }}>
-              <div ref={pickerRef} className="picker bg-white border rounded-xl p-1 w-40">
+              <div ref={pickerRef} className="picker bg-white border rounded-xl p-1 w-40" style={{ maxHeight: 'min(320px, calc(100vh - 40px))', overflowY: 'auto' }}>
                 {SHIFT_TYPES.map(s=> {
                   let helper = '';
                   if(s === '夜'){
