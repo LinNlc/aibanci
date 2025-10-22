@@ -2449,7 +2449,12 @@
                       <th className="sticky py-2 px-3 text-left left-sticky" style={{minWidth:'8.5rem'}}>日期</th>
                       <th className="sticky py-2 px-3 text-left left-sticky-2" style={{minWidth:'6.5rem'}}>星期</th>
                       <th className="sticky py-2 px-3 text-left left-sticky-3" style={{minWidth:'9rem'}}>问题</th>
-                      {employees.map(e=> {
+                      {beforeColumnWidth > 0 && (
+                        <th className="py-0" style={{ padding:0, border:0 }}>
+                          <div style={{ width: beforeColumnWidth }}></div>
+                        </th>
+                      )}
+                      {visibleEmployees.map(e=> {
                         const diff = (gridEmpCounts[e]?.总||0) - Number(adminDays||0);
                         const diffCls = diff===0? 'bg-gray-100 text-gray-700' : (diff>0? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700');
                         const tooltip = empYearStats[e];
@@ -2475,6 +2480,11 @@
                           </th>
                         );
                       })}
+                      {afterColumnWidth > 0 && (
+                        <th className="py-0" style={{ padding:0, border:0 }}>
+                          <div style={{ width: afterColumnWidth }}></div>
+                        </th>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
@@ -2532,6 +2542,11 @@
                         </tr>
                       );
                     })}
+                    {afterHeight > 0 && (
+                      <tr key="virtual-bottom" aria-hidden="true">
+                        <td colSpan={columnSpan} style={{ height: afterHeight, padding:0, border:0 }}></td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
                 <datalist id="shift-options">
