@@ -265,9 +265,6 @@
     }
     function formatOperatorLabel(user){
       const { username, display } = extractUserNames(user);
-      if(username && display && username !== display){
-        return `${username}（${display}）`;
-      }
       if(display) return display;
       if(username) return username;
       return '管理员';
@@ -1552,11 +1549,19 @@
         const snapshot = convertPayloadToTeamState(payload, { start: planStart, end: planEnd });
         if(!snapshot) return;
         skipSaveRef.current = true;
-        viewManuallyAdjustedRef.current = false;
+        const prevSnapshot = snapshotRef.current;
+        const prevVersion = prevSnapshot && (prevSnapshot.versionId ?? null);
+        const nextVersion = snapshot && (snapshot.versionId ?? null);
+        const keepManualView = viewManuallyAdjustedRef.current && prevVersion === nextVersion;
+        const finalViewStart = keepManualView ? viewStart : snapshot.viewStart;
+        const finalViewEnd = keepManualView ? viewEnd : snapshot.viewEnd;
         setPlanStart(snapshot.start);
         setPlanEnd(snapshot.end);
-        setViewStart(snapshot.viewStart);
-        setViewEnd(snapshot.viewEnd);
+        if(!keepManualView){
+          viewManuallyAdjustedRef.current = false;
+        }
+        setViewStart(finalViewStart);
+        setViewEnd(finalViewEnd);
         setEmployees(Array.isArray(snapshot.employees) ? snapshot.employees.slice() : []);
         setData(snapshot.data || {});
         setVersionId(snapshot.versionId || null);
@@ -1587,6 +1592,8 @@
         setYearlyOptimize(snapshot.yearlyOptimize === true);
         const snapshotClone = {
           ...snapshot,
+          viewStart: finalViewStart,
+          viewEnd: finalViewEnd,
           employees: Array.isArray(snapshot.employees) ? snapshot.employees.slice() : [],
           data: snapshot.data || {},
           shiftColors: { ...snapshot.shiftColors },
@@ -2201,97 +2208,13 @@
         return allDateKeys.filter(day=> (!s || day >= s) && (!e || day <= e));
       }, [planStart, planEnd, allDateKeys]);
       const gridContainerRef = useRef(null);
-      const gridScrollRafRef = useRef(null);
-      const gridRowHeightRef = useRef(56);
-      const gridColWidthRef = useRef(120);
-      const [gridScrollTop, setGridScrollTop] = useState(0);
-      const [gridScrollLeft, setGridScrollLeft] = useState(0);
-      const [gridViewportHeight, setGridViewportHeight] = useState(0);
-      const [gridViewportWidth, setGridViewportWidth] = useState(0);
-      const [gridRowHeight, setGridRowHeight] = useState(56);
-      const [gridColWidth, setGridColWidth] = useState(120);
-      useEffect(()=>{ gridRowHeightRef.current = gridRowHeight || 56; }, [gridRowHeight]);
-      useEffect(()=>{ gridColWidthRef.current = gridColWidth || 120; }, [gridColWidth]);
-      const handleGridScroll = useCallback((event)=>{
-        const node = event.currentTarget;
-        const top = node ? node.scrollTop : 0;
-        const left = node ? node.scrollLeft : 0;
-        if(gridScrollRafRef.current){
-          cancelAnimationFrame(gridScrollRafRef.current);
-        }
-        gridScrollRafRef.current = requestAnimationFrame(()=>{
-          setGridScrollTop(top);
-          setGridScrollLeft(left);
-        });
-      }, []);
-      useEffect(()=>()=>{ if(gridScrollRafRef.current) cancelAnimationFrame(gridScrollRafRef.current); }, []);
-      useLayoutEffect(()=>{
-        const node = gridContainerRef.current;
-        if(!node) return;
-        const updateSize = ()=>{
-          const nextH = node.clientHeight || 0;
-          const nextW = node.clientWidth || 0;
-          setGridViewportHeight(prev=> Math.abs(prev - nextH) > 1 ? nextH : prev);
-          setGridViewportWidth(prev=> Math.abs(prev - nextW) > 1 ? nextW : prev);
-        };
-        updateSize();
-        if(typeof ResizeObserver !== 'undefined'){
-          const ro = new ResizeObserver(()=> updateSize());
-          ro.observe(node);
-          return ()=> ro.disconnect();
-        }
-        const timer = setInterval(updateSize, 500);
-        return ()=> clearInterval(timer);
-      }, [employees.length, dateList.length]);
       useEffect(()=>{
-        setGridScrollTop(0);
-        setGridScrollLeft(0);
         const node = gridContainerRef.current;
         if(node){
           node.scrollTop = 0;
           node.scrollLeft = 0;
         }
       }, [team, viewStart, viewEnd, planStart, planEnd, employees.length]);
-      const measureRow = useCallback((node)=>{
-        if(node){
-          const rect = node.getBoundingClientRect();
-          const nextHeight = rect && rect.height ? rect.height : 0;
-          if(nextHeight && Math.abs(nextHeight - gridRowHeightRef.current) > 1){
-            gridRowHeightRef.current = nextHeight;
-            setGridRowHeight(nextHeight);
-          }
-        }
-      }, []);
-      const measureCell = useCallback((node)=>{
-        if(node){
-          const rect = node.getBoundingClientRect();
-          const nextWidth = rect && rect.width ? rect.width : 0;
-          if(nextWidth && Math.abs(nextWidth - gridColWidthRef.current) > 1){
-            gridColWidthRef.current = nextWidth;
-            setGridColWidth(nextWidth);
-          }
-        }
-      }, []);
-      const safeRowHeight = Math.max(1, gridRowHeight || 56);
-      const estimatedRowsInView = gridViewportHeight > 0 ? Math.ceil(gridViewportHeight / safeRowHeight) : 14;
-      const overscanRows = Math.max(10, Math.ceil(estimatedRowsInView / 2));
-      const totalHeight = safeRowHeight * dateList.length;
-      const startIndex = Math.max(0, Math.floor(gridScrollTop / safeRowHeight) - overscanRows);
-      const endIndex = Math.min(dateList.length, Math.ceil((gridScrollTop + gridViewportHeight) / safeRowHeight) + overscanRows);
-      const visibleDates = dateList.slice(startIndex, endIndex);
-      const beforeHeight = startIndex * safeRowHeight;
-      const afterHeight = Math.max(0, totalHeight - endIndex * safeRowHeight);
-      const safeColWidth = Math.max(40, gridColWidth || 120);
-      const totalColumnWidth = safeColWidth * Math.max(employees.length, 0);
-      const estimatedColsInView = gridViewportWidth > 0 ? Math.ceil(gridViewportWidth / safeColWidth) : 8;
-      const overscanCols = Math.max(10, Math.ceil(estimatedColsInView / 2));
-      const startEmpIndex = Math.max(0, Math.floor(gridScrollLeft / safeColWidth) - overscanCols);
-      const endEmpIndex = Math.min(employees.length, Math.ceil((gridScrollLeft + gridViewportWidth) / safeColWidth) + overscanCols);
-      const visibleEmployees = employees.slice(startEmpIndex, endEmpIndex);
-      const beforeColumnWidth = startEmpIndex * safeColWidth;
-      const afterColumnWidth = Math.max(0, totalColumnWidth - endEmpIndex * safeColWidth);
-      const dynamicColumnCount = visibleEmployees.length + (beforeColumnWidth > 0 ? 1 : 0) + (afterColumnWidth > 0 ? 1 : 0);
-      const columnSpan = Math.max(1, 3 + Math.max(dynamicColumnCount, 1));
       const activeCellRef = useRef(null);
       const setCellByIndex = useCallback((dIndex, eIndex, value)=>{
         const d = dateList[dIndex];
@@ -2306,32 +2229,22 @@
         });
       }, [dateList, employees]);
       const onFocusCell = useCallback((dIndex, eIndex)=>{ activeCellRef.current = { dIndex, eIndex }; }, []);
-      const dateCount = dateList.length;
-      const empCount = employees.length;
       const moveActive = useCallback((dx, dy)=>{
         const cur = activeCellRef.current || { dIndex:0, eIndex:0 };
-        const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateCount-1));
-        const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, empCount-1));
+        const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateList.length-1));
+        const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, employees.length-1));
         activeCellRef.current = { dIndex: ni, eIndex: nj };
-        const container = gridContainerRef.current;
-        if(container){
-          const rowHeight = gridRowHeightRef.current || safeRowHeight;
-          const targetTop = ni * rowHeight;
-          const targetBottom = targetTop + rowHeight;
-          const viewTop = container.scrollTop;
-          const viewBottom = viewTop + container.clientHeight;
-          if(targetTop < viewTop){
-            container.scrollTop = targetTop;
-          } else if(targetBottom > viewBottom){
-            container.scrollTop = targetBottom - container.clientHeight;
-          }
-        }
         const id = `cell-${ni}-${nj}`;
         requestAnimationFrame(()=>{
           const el = document.getElementById(id);
-          if(el) el.focus();
+          if(el){
+            el.focus();
+            if(typeof el.scrollIntoView === 'function'){
+              try{ el.scrollIntoView({ block:'nearest', inline:'nearest' }); }catch{}
+            }
+          }
         });
-      }, [dateCount, empCount, safeRowHeight]);
+      }, [dateList, employees]);
       const openPickerAt = useCallback((di, ei, anchorEl)=>{
         if(editingLocked) return;
         const el = anchorEl || document.getElementById(`cell-${di}-${ei}`);
@@ -2386,103 +2299,24 @@
         }
       }, [moveActive, openPickerAt]);
 
-      const ScheduleRow = React.memo(function ScheduleRow({
-        day,
-        di,
-        employeesList,
-        visibleEmployees,
-        startEmpIndex,
-        beforeColumnWidth,
-        afterColumnWidth,
-        rowData,
-        issue,
-        staffingAlerts,
-        editingLocked,
-        shiftColors,
-        onFocusCell,
-        onKeyDownCell,
-        openPickerAt,
-        setCellByIndex,
-        rowRef,
-        measureCell
-      }){
-        const dataRow = rowData || EMPTY_ROW;
-        const stats = useMemo(()=>{
-          let total = 0; let white = 0; let mid1 = 0; let mid2 = 0; let night = 0;
-          for(const emp of employeesList){
-            const v = dataRow[emp];
-            if(!v || v==='休') continue;
-            total++;
-            if(v==='白') white++;
-            else if(v==='中1') mid1++;
-            else if(v==='中2') mid2++;
-            else if(v==='夜') night++;
-          }
-          return { total, white, mid1, mid2, night };
-        }, [dataRow, employeesList]);
-        const w = dow(day);
-        const weekend = w===0 || w===6;
-        const weekLabel = WN[w];
-        return (
-          <tr ref={rowRef || null} data-row-index={di} className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
-            <td className="py-1.5 px-3 font-medium text-gray-800 left-sticky" style={{minWidth:'8.5rem'}}>
-              <div className="flex items-center gap-2"><span>{day}</span></div>
-              <div className="text-xs text-gray-500 flex flex-wrap items-center gap-1">
-                <span style={styleForStaffing(stats.total, staffingAlerts.total)}>在岗 {stats.total}</span>
-                <span>（</span>
-                <span style={styleForStaffing(stats.white, staffingAlerts.white)}>白 {stats.white}</span>
-                <span>/</span>
-                <span style={styleForStaffing(stats.mid1, staffingAlerts.mid1)}>中1 {stats.mid1}</span>
-                <span>/</span>
-                <span>中2 {stats.mid2}</span>
-                <span>/</span>
-                <span>夜 {stats.night}</span>
-                <span>）</span>
-              </div>
-            </td>
-            <td className="py-1.5 px-3 text-gray-500 left-sticky-2" style={{minWidth:'6.5rem'}}>周{weekLabel}</td>
-            <td className="py-1.5 px-3 left-sticky-3" style={{minWidth:'9rem'}}>
-              {issue? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
-            </td>
-            {beforeColumnWidth > 0 && (
-              <td className="py-0" style={{ padding:0, border:0 }}>
-                <div style={{ width: beforeColumnWidth }}></div>
-              </td>
-            )}
-            {visibleEmployees.map((emp, offset)=>{
-              const ei = startEmpIndex + offset;
-              const value = dataRow[emp] || '';
-              const bg = shiftColors[value] || undefined;
-              const cellRef = offset === 0 && measureCell ? measureCell : null;
-              return (
-                <td key={emp} className="py-1.5 px-3" ref={cellRef}>
-                  <div className="cell-wrap">
-                    <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
-                      style={{ backgroundColor: bg }} value={value}
-                      disabled={editingLocked}
-                      title={editingLocked? '执行中：只读' : ''}
-                      onFocus={()=> onFocusCell(di, ei)}
-                      onKeyDown={(ev)=> onKeyDownCell(ev, di, ei)}
-                      onCompositionStart={(ev)=>{ ev.target.isComposing = true; }}
-                      onCompositionEnd={(ev)=>{ ev.target.isComposing = false; setCellByIndex(di, ei, ev.currentTarget.value); }}
-                      onChange={ev=> setCellByIndex(di, ei, ev.target.value)}
-                      onDoubleClick={(ev)=>{ if(editingLocked) return; openPickerAt(di, ei, ev.currentTarget); }} placeholder="白/中1/中2/夜/休 或留空" />
-                    <button className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title="选择班次"
-                      onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
-                      <span className="sr-only">打开班次选择器</span>
-                    </button>
-                  </div>
-                </td>
-              );
-            })}
-            {afterColumnWidth > 0 && (
-              <td className="py-0" style={{ padding:0, border:0 }}>
-                <div style={{ width: afterColumnWidth }}></div>
-              </td>
-            )}
-          </tr>
-        );
-      });
+      const dailyStats = useMemo(()=>{
+        const stats = {};
+        dateList.forEach(day=>{
+          const row = data[day] || {};
+          const stat = { 总:0, 白:0, 中1:0, 中2:0, 夜:0 };
+          employees.forEach(emp=>{
+            const v = row[emp];
+            if(!v || v==='休') return;
+            stat['总']++;
+            if(v==='白') stat['白']++;
+            else if(v==='中1') stat['中1']++;
+            else if(v==='中2') stat['中2']++;
+            else if(v==='夜') stat['夜']++;
+          });
+          stats[day] = stat;
+        });
+        return stats;
+      }, [dateList, data, employees]);
 
       function clearRange(mode='empty'){
         setData(prev=>{ const next={...prev}; for(const d of dateList){ const r={...(next[d]||{})}; for(const e of employees){ r[e] = (mode==='rest')? '休' : ''; } next[d]=r; } return next; });
@@ -2607,7 +2441,6 @@
               <div
                 ref={gridContainerRef}
                 className="grid-wrap border rounded-xl shadow-inner"
-                onScroll={handleGridScroll}
                 onPaste={(e)=>{ if(editingLocked) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}
               >
                 <table className="min-w-max text-sm w-full">
@@ -2655,37 +2488,58 @@
                     </tr>
                   </thead>
                   <tbody>
-                    {beforeHeight > 0 && (
-                      <tr key="virtual-top" aria-hidden="true">
-                        <td colSpan={columnSpan} style={{ height: beforeHeight, padding:0, border:0 }}></td>
-                      </tr>
-                    )}
-                    {visibleDates.map((d, idx)=>{
-                      const di = startIndex + idx;
-                      const rowRef = idx === 0 ? measureRow : null;
-                      const cellMeasure = idx === 0 ? measureCell : null;
+                    {dateList.map((d, di)=>{
+                      const w = dow(d);
+                      const weekend = w===0 || w===6;
+                      const issue = nightIssues[d] || '';
+                      const stat = dailyStats[d] || { 总:0, 白:0, 中1:0, 中2:0, 夜:0 };
+                      const row = data[d] || {};
                       return (
-                        <ScheduleRow
-                          key={d}
-                          day={d}
-                          di={di}
-                          employeesList={employees}
-                          visibleEmployees={visibleEmployees}
-                          startEmpIndex={startEmpIndex}
-                          beforeColumnWidth={beforeColumnWidth}
-                          afterColumnWidth={afterColumnWidth}
-                          rowData={data[d] || EMPTY_ROW}
-                          issue={nightIssues[d] || ''}
-                          staffingAlerts={staffingAlerts}
-                          editingLocked={editingLocked}
-                          shiftColors={shiftColors}
-                          onFocusCell={onFocusCell}
-                          onKeyDownCell={onKeyDownCell}
-                          openPickerAt={openPickerAt}
-                          setCellByIndex={setCellByIndex}
-                          rowRef={rowRef}
-                          measureCell={cellMeasure}
-                        />
+                        <tr key={d} className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
+                          <td className="py-1.5 px-3 font-medium text-gray-800 left-sticky" style={{minWidth:'8.5rem'}}>
+                            <div className="flex items-center gap-2"><span>{d}</span></div>
+                            <div className="text-xs text-gray-500 flex flex-wrap items-center gap-1">
+                              <span style={styleForStaffing(stat['总'], staffingAlerts.total)}>在岗 {stat['总']}</span>
+                              <span>（</span>
+                              <span style={styleForStaffing(stat['白'], staffingAlerts.white)}>白 {stat['白']}</span>
+                              <span>/</span>
+                              <span style={styleForStaffing(stat['中1'], staffingAlerts.mid1)}>中1 {stat['中1']}</span>
+                              <span>/</span>
+                              <span>中2 {stat['中2']}</span>
+                              <span>/</span>
+                              <span>夜 {stat['夜']}</span>
+                              <span>）</span>
+                            </div>
+                          </td>
+                          <td className="py-1.5 px-3 text-gray-500 left-sticky-2" style={{minWidth:'6.5rem'}}>周{WN[w]}</td>
+                          <td className="py-1.5 px-3 left-sticky-3" style={{minWidth:'9rem'}}>
+                            {issue ? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
+                          </td>
+                          {employees.map((e, ei)=>{
+                            const value = row[e] || '';
+                            const bg = shiftColors[value] || undefined;
+                            return (
+                              <td key={e} className="py-1.5 px-3">
+                                <div className="cell-wrap">
+                                  <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
+                                    style={{ backgroundColor: bg }} value={value}
+                                    disabled={editingLocked}
+                                    title={editingLocked? '执行中：只读' : ''}
+                                    onFocus={()=> onFocusCell(di, ei)}
+                                    onKeyDown={(ev)=> onKeyDownCell(ev, di, ei)}
+                                    onCompositionStart={(ev)=>{ ev.target.isComposing = true; }}
+                                    onCompositionEnd={(ev)=>{ ev.target.isComposing = false; setCellByIndex(di, ei, ev.currentTarget.value); }}
+                                    onChange={ev=> setCellByIndex(di, ei, ev.target.value)}
+                                    onDoubleClick={(ev)=>{ if(editingLocked) return; openPickerAt(di, ei, ev.currentTarget); }} placeholder="白/中1/中2/夜/休 或留空" />
+                                  <button className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title="选择班次"
+                                    onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
+                                    <span className="sr-only">打开班次选择器</span>
+                                  </button>
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
                       );
                     })}
                     {afterHeight > 0 && (
