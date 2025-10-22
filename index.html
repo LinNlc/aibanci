@@ -131,6 +131,14 @@
       d.setDate(d.getDate()-mondayIdx);
       return fmt(d);
     }
+    function formatDateTimeString(value){
+      if(!value) return '—';
+      const str = String(value);
+      const candidate = str.includes('T') ? str : str.replace(' ', 'T');
+      const date = new Date(candidate);
+      if(Number.isNaN(date.getTime())) return str;
+      return date.toLocaleString();
+    }
 
     function albumEntryKey(entry, fallbackIndex = 0){
       if(entry && entry.id) return String(entry.id);
@@ -393,6 +401,15 @@
         }
       };
     }
+    function normalizeBackupConfig(raw){
+      const base = { intervalMinutes: 10, limit: 50 };
+      if(!raw || typeof raw !== 'object') return { ...base };
+      const intervalRaw = raw.intervalMinutes ?? raw.interval_minutes ?? raw.interval ?? 10;
+      const limitRaw = raw.limit ?? raw.maxCount ?? raw.max_count ?? 50;
+      const interval = Number.isFinite(Number(intervalRaw)) ? Math.max(1, Math.round(Number(intervalRaw))) : 10;
+      const limit = Number.isFinite(Number(limitRaw)) ? Math.max(1, Math.round(Number(limitRaw))) : 50;
+      return { intervalMinutes: interval, limit };
+    }
     function defaultOrgConfig(){
       return {
         teams: [
@@ -407,7 +424,8 @@
             menus: defaultMenuPerms({ roles:{ visible:true } }),
             teamAccess:['*']
           }
-        ]
+        ],
+        backup: normalizeBackupConfig()
       };
     }
     function normalizeOrgConfig(raw){
@@ -459,7 +477,8 @@
         teamAccess:['*']
       };
       accounts.push(adminAccount);
-      return { teams, accounts };
+      const backup = normalizeBackupConfig(raw?.backup || defaults.backup);
+      return { teams, accounts, backup };
     }
     function createEmptyTeamState(rangeStart, rangeEnd){
       return {
@@ -494,7 +513,9 @@
         batchChecked: {},
         albumHistory: [],
         historyProfile: null,
-        yearlyOptimize: false
+        yearlyOptimize: false,
+        updatedAt: null,
+        lastBackupAt: null
       };
     }
     const ORG_STORAGE_KEY = 'scheduler_org_config_v1';
@@ -574,7 +595,7 @@
         { key:'album', icon:'magic', label:'专辑审核自动排班' },
         { key:'users', icon:'users', label:'员工管理' },
         { key:'stats', icon:'chart', label:'统计与对齐' },
-        { key:'history', icon:'history', label:'历史版本' },
+        { key:'history', icon:'history', label:'备份记录' },
         { key:'settings', icon:'cog', label:'设置 / 导出' },
         { key:'roles', icon:'lock', label:'角色设置' }
       ];
@@ -887,6 +908,8 @@
 
       const [team, setTeam] = useState(()=> (orgConfig.teams?.[0]?.id || 'default'));
       const [note, setNote] = useState('');
+      const [serverUpdatedAt, setServerUpdatedAt] = useState(null);
+      const [lastBackupAt, setLastBackupAt] = useState(null);
       const [planStart, setPlanStart] = useState(defaultStart);
       const [planEnd, setPlanEnd]     = useState(defaultEnd);
       const [viewStart, setViewStart] = useState(defaultStart);
@@ -898,6 +921,31 @@
       const [versions, setVersions]   = useState([]);
       const [versionsLoading, setVersionsLoading] = useState(false);
       const [showAutoSaves, setShowAutoSaves] = useState(false);
+      const [teamLogs, setTeamLogs] = useState([]);
+      const [teamLogsLoading, setTeamLogsLoading] = useState(false);
+      const [teamLogsError, setTeamLogsError] = useState('');
+      const refreshTeamLogs = useCallback(async ()=>{
+        const trimmedTeam = (team || '').trim();
+        if(!trimmedTeam || !user){
+          setTeamLogs([]);
+          setTeamLogsError('');
+          return;
+        }
+        setTeamLogsLoading(true);
+        setTeamLogsError('');
+        try{
+          const params = new URLSearchParams();
+          params.set('team', trimmedTeam);
+          params.set('limit', '100');
+          const res = await apiGet(`/team/logs?${params.toString()}`);
+          const list = Array.isArray(res?.logs) ? res.logs : [];
+          setTeamLogs(list);
+        }catch(err){
+          setTeamLogsError(err?.message || '加载日志失败');
+        }finally{
+          setTeamLogsLoading(false);
+        }
+      }, [team, user]);
       const filteredVersions = useMemo(()=>{
         if(showAutoSaves) return versions;
         return versions.filter(v=>{
@@ -1119,6 +1167,7 @@
       useEffect(()=>{ tryRestoreRestForView(); }, [team, planStart, planEnd]);
 
       const teamsList = orgConfig.teams || [];
+      const backupConfig = useMemo(()=> normalizeBackupConfig(orgConfig.backup), [orgConfig.backup]);
       const accountConfig = useMemo(()=>{
         if(!user) return null;
         return orgConfig.accounts.find(acc=> acc.username === user.username) || null;
@@ -1182,6 +1231,7 @@
         })();
         return ()=>{ cancelled = true; };
       }, [user, accessibleTeams, team, defaultStart, defaultEnd]);
+      useEffect(()=>{ refreshTeamLogs(); }, [refreshTeamLogs]);
 
       const activeTeam = useMemo(()=> teamsList.find(t=> t.id === team) || teamsList[0] || { id: team, name: team, features:{ albumScheduler:true } }, [teamsList, team]);
       const teamFeatures = activeTeam?.features || { albumScheduler:true };
@@ -1237,7 +1287,7 @@
         album: '专辑审核',
         users: '员工管理',
         stats: '统计与对齐',
-        history: '历史版本',
+        history: '备份记录',
         settings: '设置 / 导出',
         roles: '角色设置'
       };
@@ -1408,6 +1458,13 @@
           return { ...acc, teamAccess: current };
         });
       };
+      const updateBackupSetting = (field, value)=>{
+        updateOrgConfig(prev=>{
+          const current = normalizeBackupConfig(prev.backup);
+          const next = { ...current, [field]: value };
+          return { ...prev, backup: next };
+        });
+      };
 
       const lastLoadedVersionRef = useRef({});
       const autoLoadedTeamRef = useRef({});
@@ -1421,6 +1478,8 @@
         if(user){
           setTeamStateMap({});
         }
+        setServerUpdatedAt(null);
+        setLastBackupAt(null);
       }, [user?.username]);
       const autoLoadKey = useMemo(()=>{
         const safeTeam = team || 'default';
@@ -1471,6 +1530,8 @@
         const viewEndRaw = get('viewEnd','view_end');
         const resolvedViewStart = typeof viewStartRaw === 'string' && viewStartRaw ? viewStartRaw.slice(0,10) : resolvedStart;
         const resolvedViewEnd = typeof viewEndRaw === 'string' && viewEndRaw ? viewEndRaw.slice(0,10) : resolvedEnd;
+        const updatedAtRaw = get('updatedAt','updated_at');
+        const lastBackupRaw = get('lastBackupAt','last_backup_at');
         const employeesPayload = get('employees');
         const employees = Array.isArray(employeesPayload) ? employeesPayload.map(e=> typeof e === 'string' ? e : String(e)) : [];
         const dataPayload = get('data');
@@ -1543,7 +1604,9 @@
           albumAutoNote: typeof albumAutoNotePayload === 'string' ? albumAutoNotePayload : '',
           albumHistory: Array.isArray(albumHistoryPayload) ? albumHistoryPayload.map(item=> ({ ...item, assignments: item?.assignments || {} })) : [],
           historyProfile: historyProfilePayload || null,
-          yearlyOptimize: yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1'
+          yearlyOptimize: yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1',
+          updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw ? updatedAtRaw : null,
+          lastBackupAt: typeof lastBackupRaw === 'string' && lastBackupRaw ? lastBackupRaw : null
         };
       }
 
@@ -1585,6 +1648,10 @@
         setAlbumHistory(Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []);
         setHistoryProfile(snapshot.historyProfile || null);
         setYearlyOptimize(snapshot.yearlyOptimize === true);
+        const payloadUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : (typeof payload?.updated_at === 'string' ? payload.updated_at : (snapshot.updatedAt || null));
+        const payloadBackupAt = typeof payload?.lastBackupAt === 'string' ? payload.lastBackupAt : (typeof payload?.last_backup_at === 'string' ? payload.last_backup_at : (snapshot.lastBackupAt || null));
+        setServerUpdatedAt(payloadUpdatedAt || null);
+        setLastBackupAt(payloadBackupAt || null);
         const snapshotClone = {
           ...snapshot,
           employees: Array.isArray(snapshot.employees) ? snapshot.employees.slice() : [],
@@ -1596,7 +1663,9 @@
           batchChecked: snapshot.batchChecked ? { ...snapshot.batchChecked } : {},
           albumSelected: snapshot.albumSelected ? { ...snapshot.albumSelected } : {},
           albumAssignments: snapshot.albumAssignments ? { ...snapshot.albumAssignments } : {},
-          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []
+          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : [],
+          updatedAt: payloadUpdatedAt || null,
+          lastBackupAt: payloadBackupAt || null
         };
         snapshotRef.current = snapshotClone;
         lastSavedSnapshotRef.current = JSON.stringify(snapshotClone);
@@ -1845,6 +1914,14 @@
                 lastLoadedVersionRef.current[team] = returnedVersion;
               }
             }
+            if(res){
+              if(res.updated_at || res.updatedAt){
+                setServerUpdatedAt(res.updated_at || res.updatedAt);
+              }
+              if(res.last_backup_at || res.lastBackupAt){
+                setLastBackupAt(res.last_backup_at || res.lastBackupAt);
+              }
+            }
             if(serializedSnapshot){
               lastSavedSnapshotRef.current = serializedSnapshot;
             }
@@ -1893,6 +1970,10 @@
         } else {
           lastSavedSnapshotRef.current = body;
         }
+        try{
+          const nowIso = new Date().toISOString();
+          setServerUpdatedAt(nowIso);
+        }catch{}
         pendingAutoSaveRef.current = false;
         autoSaveSendingRef.current = false;
         return true;
@@ -1945,36 +2026,10 @@
           globalErr(e.message);
         }
       }
-      async function saveToServer(){
-        const snapshotBeforeSave = snapshotRef.current;
-        try{
-          const payload = buildSavePayload();
-          const res = await apiPost('/schedule/save', payload);
-          const returnedVersion = res && (res.version_id || res.versionId);
-          const nextVersion = returnedVersion || versionId || null;
-          applyServerState({ ...payload, versionId: nextVersion });
-          if(nextVersion){
-            lastLoadedVersionRef.current[team] = nextVersion;
-            if(team){
-              initialTeamSyncRef.current[team] = true;
-            }
-          }
-          showToast('已保存新版本', 'success');
-          if(tab === 'history'){
-            loadVersions();
-          }
-        } catch(e){
-          if(e?.payload && e.payload.code===409){
-            await resolveSaveConflict('manual-save', snapshotBeforeSave, { manual:true });
-            return;
-          }
-          globalErr(e.message);
-        }
-      }
       async function loadVersions(){
         const trimmedTeam = (team || '').trim();
         if(!trimmedTeam){
-          globalErr('请选择团队后再刷新历史版本');
+          globalErr('请选择团队后再刷新备份记录');
           return;
         }
         setVersionsLoading(true);
@@ -2018,7 +2073,7 @@
       }
       async function deleteVersionById(id){
         if(!id) return;
-        if(!confirm('确定删除该历史版本吗？删除后无法恢复。')) return;
+        if(!confirm('确定删除该备份记录吗？删除后无法恢复。')) return;
         const trimmedTeam = (team || '').trim();
         if(!trimmedTeam){
           globalErr('请选择团队后再操作');
@@ -2031,7 +2086,7 @@
           if(lastLoadedVersionRef.current[trimmedTeam] === id){
             delete lastLoadedVersionRef.current[trimmedTeam];
           }
-          showToast('已删除历史版本', 'success');
+          showToast('已删除备份记录', 'success');
           await loadVersions();
         } catch(e){
           globalErr(e.message);
@@ -3418,7 +3473,7 @@
                 </tbody>
               </table>
             </div>
-            <div className="mt-3"><PillBtn color="emerald" onClick={saveToServer} disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存人员与偏好到服务器</PillBtn></div>
+            <div className="mt-3 text-xs text-gray-500">人员与偏好会随编辑自动保存，并参与团队备份。</div>
           </div>
         </Section>
       );
@@ -4028,33 +4083,34 @@
         );
       })();
 
+
       const ViewHistory = (
-        <Section title={`历史版本（${teamDisplayName}）`} right={<div className="flex items-center gap-3">
+        <Section title={`备份记录（${teamDisplayName}）`} right={<div className="flex items-center gap-3">
           <label className="inline-flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" className="rounded" checked={showAutoSaves} onChange={e=> setShowAutoSaves(e.target.checked)} />显示自动保存</label>
           <button onClick={loadVersions} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(editingLocked || versionsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={editingLocked || versionsLoading}>
-            {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新列表'}
+            {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新备份'}
           </button>
         </div>}>
           {versionsLoading && filteredVersions.length>0 && (
             <div className="flex items-center gap-2 text-xs text-gray-500 mb-3">
               <Spinner className="w-4 h-4 text-indigo-500" />
-              <span>正在刷新历史版本，请稍候…</span>
+              <span>正在刷新备份记录，请稍候…</span>
             </div>
           )}
           {versionsLoading && filteredVersions.length===0 ? (
-            <div className="text-sm text-gray-500">正在加载历史版本…</div>
+            <div className="text-sm text-gray-500">正在加载备份记录…</div>
           ) : filteredVersions.length===0 ? (
             versions.length>0 && !showAutoSaves && versions.some(v=> isAutoSaveLabel((v?.created_by_name || v?.created_by || '').trim())) ? (
               <p className="text-sm text-gray-500">当前筛选仅隐藏了自动保存记录，如需查看请勾选“显示自动保存”。</p>
             ) : (
-              <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无历史版本，请在“设置 / 导出”页保存新版本或稍后刷新。</p>
+              <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无备份记录，稍后刷新即可。</p>
             )
           ) : (
             <div className="overflow-auto rounded-2xl border" style={{ maxHeight: 'min(70vh, calc(100vh - 240px))' }}>
               <table className="text-sm w-full min-w-[780px]">
                 <thead className="bg-gray-50 text-gray-500">
                   <tr>
-                    <th className="text-left py-2 px-3">版本名</th>
+                    <th className="text-left py-2 px-3">备份备注</th>
                     <th className="text-left py-2 px-3">团队</th>
                     <th className="text-left py-2 px-3">版本ID</th>
                     <th className="text-left py-2 px-3">保存时间</th>
@@ -4080,7 +4136,7 @@
                         </td>
                         <td className="py-1 px-3 text-gray-600">{teamName}</td>
                         <td className="py-1 px-3 text-gray-600">{v.id}</td>
-                        <td className="py-1 px-3 text-gray-600">{createdAt}</td>
+                        <td className="py-1 px-3 text-gray-600">{formatDateTimeString(createdAt)}</td>
                         <td className="py-1 px-3 text-gray-600">
                           <span>{operator}</span>
                           {isAuto && <span className="ml-2 inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-500">自动保存</span>}
@@ -4101,6 +4157,39 @@
               </table>
             </div>
           )}
+          <div className="mt-6 rounded-2xl border bg-white/80 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-medium text-gray-700">操作日志</h3>
+              <button onClick={refreshTeamLogs} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(teamLogsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={teamLogsLoading}>
+                {teamLogsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新日志'}
+              </button>
+            </div>
+            {teamLogsError ? (
+              <div className="text-xs text-rose-500">{teamLogsError}</div>
+            ) : teamLogsLoading && teamLogs.length===0 ? (
+              <div className="text-xs text-gray-500">日志加载中…</div>
+            ) : teamLogs.length === 0 ? (
+              <div className="text-xs text-gray-500">暂无操作日志。</div>
+            ) : (
+              <ul className="space-y-2">
+                {teamLogs.map((log, idx)=> {
+                  const createdAt = log?.created_at || log?.createdAt || null;
+                  const key = log?.id != null ? String(log.id) : `${createdAt || 'log'}-${idx}`;
+                  const actionLabel = log?.action === 'update_schedule' ? '更新排班' : (log?.action || '操作');
+                  return (
+                    <li key={key} className="border rounded-xl bg-white/70 px-3 py-2 shadow-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-sm font-medium text-gray-800">{actionLabel}</span>
+                        <span className="text-xs text-gray-400">{formatDateTimeString(createdAt)}</span>
+                      </div>
+                      <div className="mt-1 text-xs text-gray-500">操作者：{log?.operator || '—'}</div>
+                      {log?.detail ? <div className="mt-1 text-sm text-gray-600">{log.detail}</div> : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
         </Section>
       );
       const scheduleYearLabel = (()=>{
@@ -4111,21 +4200,31 @@
         <Section title="设置 / 导出">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm text-gray-600 mb-1">保存备注</label>
+              <label className="block text-sm text-gray-600 mb-1">排班备注（自动保存）</label>
               <input className="w-full border rounded px-3 py-2" value={note}
                 onCompositionStart={e=>{ e.target.isComposing = true; }}
                 onCompositionEnd={e=>{ e.target.isComposing = false; setNote(e.target.value); }}
-                onChange={allowIme(e=>setNote(e.target.value))} placeholder="例如：10月第一版"/>
+                onChange={allowIme(e=>setNote(e.target.value))} placeholder="例如：10月排班说明（将自动同步）"/>
             </div>
-            <div className="flex flex-wrap items-end gap-2">
-              <PillBtn onClick={saveToServer} color="emerald" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存新版本</PillBtn>
-              <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>服务器导出 Excel/CSV</PillBtn>
-              <PillBtn onClick={downloadTemplate} color="gray">下载导入模板</PillBtn>
-              <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?'执行中：只读':(importing?'导入中…':'')}>
-                {importing ? (<><Spinner className="w-4 h-4 text-white" /> 导入中…</>) : '导入 Excel' }
-              </PillBtn>
-              <input type="file" ref={importInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={onImportInputChange} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="block text-sm text-gray-600">备份间隔（分钟）
+                <input type="number" min={1} className="mt-1 w-full border rounded px-3 py-2" value={backupConfig.intervalMinutes}
+                  onChange={e=> updateBackupSetting('intervalMinutes', Math.max(1, Number(e.target.value)||1))} />
+              </label>
+              <label className="block text-sm text-gray-600">备份保留数量
+                <input type="number" min={1} className="mt-1 w-full border rounded px-3 py-2" value={backupConfig.limit}
+                  onChange={e=> updateBackupSetting('limit', Math.max(1, Number(e.target.value)||1))} />
+              </label>
             </div>
+          </div>
+          <div className="mt-2 text-xs text-gray-500">所有改动会立即写入服务器，并按上述设置自动备份。<span className="ml-2">最近保存：{formatDateTimeString(serverUpdatedAt)}</span><span className="ml-2">最近备份：{formatDateTimeString(lastBackupAt)}</span></div>
+          <div className="mt-4 flex flex-wrap items-end gap-2">
+            <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>服务器导出 Excel/CSV</PillBtn>
+            <PillBtn onClick={downloadTemplate} color="gray">下载导入模板</PillBtn>
+            <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?'执行中：只读':(importing?'导入中…':'')}>
+              {importing ? (<><Spinner className="w-4 h-4 text-white" /> 导入中…</>) : '导入 Excel' }
+            </PillBtn>
+            <input type="file" ref={importInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={onImportInputChange} />
           </div>
           <div className="mt-2 text-xs text-gray-500">导入支持 XLSX / XLS / CSV 格式，将覆盖当前排班并自动更新周期。</div>
           <div className="mt-6">
@@ -4374,7 +4473,7 @@
           {Topbar}
           <div className="layout-shell py-6">
             <SideDock tab={tab} setTab={setTab} menuPerms={menuPerms}/>
-            <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.3</footer></main>
+            <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.4</footer></main>
           </div>
 
           {toast && (
