@@ -64,14 +64,40 @@ function db(): PDO {
   } catch (Throwable $e) {
     // 已有 payload 列时忽略
   }
-$pdo->exec("CREATE INDEX IF NOT EXISTS idx_sv_team_range ON schedule_versions(team, view_start, view_end, id);");
+  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_sv_team_range ON schedule_versions(team, view_start, view_end, id);");
 
-$pdo->exec("
-  CREATE TABLE IF NOT EXISTS org_config (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    payload TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-  );
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS team_states (
+      team TEXT PRIMARY KEY,
+      payload TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_by TEXT,
+      last_backup_at TEXT
+    );
+  ");
+
+  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_team_states_updated_at ON team_states(updated_at);");
+
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS team_activity_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team TEXT NOT NULL,
+      operator TEXT,
+      action TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    );
+  ");
+
+  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_team_logs_team_created_at ON team_activity_logs(team, created_at DESC, id DESC);");
+
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS org_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      payload TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    );
 ");
   return $pdo;
 }
@@ -103,6 +129,69 @@ function ymd_range(string $start, string $end): array {
 function cn_week(string $ymd): string {
   $w = date('w', strtotime($ymd)); // 0..6
   return ['日','一','二','三','四','五','六'][$w] ?? '';
+}
+
+function now_local(): string {
+  return date('Y-m-d H:i:s');
+}
+
+function fetch_org_config_payload(PDO $pdo, bool $forceReload = false): array {
+  static $cached = null;
+  if ($forceReload) {
+    $cached = null;
+  }
+  if ($cached !== null) {
+    return $cached;
+  }
+  $stmt = $pdo->query('SELECT payload FROM org_config WHERE id = 1 LIMIT 1');
+  $row = $stmt->fetch();
+  $payload = [];
+  if ($row && isset($row['payload'])) {
+    $decoded = decode_json_assoc($row['payload']);
+    if ($decoded) {
+      $payload = $decoded;
+    }
+  }
+  $cached = $payload;
+  return $payload;
+}
+
+function backup_settings(PDO $pdo): array {
+  $config = fetch_org_config_payload($pdo);
+  $backup = [];
+  if (isset($config['backup']) && is_array($config['backup'])) {
+    $backup = $config['backup'];
+  }
+  $interval = 10;
+  if (isset($backup['intervalMinutes'])) {
+    $interval = (int)$backup['intervalMinutes'];
+  } elseif (isset($backup['interval_minutes'])) {
+    $interval = (int)$backup['interval_minutes'];
+  }
+  if ($interval < 1) $interval = 10;
+
+  $limit = 50;
+  if (isset($backup['limit'])) {
+    $limit = (int)$backup['limit'];
+  } elseif (isset($backup['maxCount'])) {
+    $limit = (int)$backup['maxCount'];
+  }
+  if ($limit < 1) $limit = 50;
+
+  return [
+    'interval' => $interval,
+    'limit' => $limit,
+  ];
+}
+
+function append_team_log(PDO $pdo, string $team, string $operator, string $action, string $detail = ''): void {
+  $stmt = $pdo->prepare('INSERT INTO team_activity_logs(team, operator, action, detail) VALUES(?,?,?,?)');
+  $stmt->execute([
+    $team,
+    $operator,
+    $action,
+    $detail,
+  ]);
 }
 
 function send_schedule_export(array $header, array $rows, string $filenameBase): void {
@@ -505,6 +594,61 @@ switch (true) {
     if (!$team) send_error('参数缺失', 400);
 
     $pdo = db();
+    $stateStmt = $pdo->prepare('SELECT payload, version, updated_at, updated_by, last_backup_at FROM team_states WHERE team=? LIMIT 1');
+    $stateStmt->execute([$team]);
+    $stateRow = $stateStmt->fetch();
+
+    if ($stateRow) {
+      $payloadArr = decode_json_assoc($stateRow['payload'] ?? '');
+      if (!$payloadArr) {
+        $payloadArr = [];
+      }
+      $employeesArr = $payloadArr['employees'] ?? [];
+      if (!is_array($employeesArr)) {
+        $employeesArr = [];
+      }
+      $dataArr = $payloadArr['data'] ?? [];
+      if (!is_array($dataArr)) {
+        $dataArr = [];
+      }
+      $employeesJson = json_encode(array_values($employeesArr), JSON_UNESCAPED_UNICODE);
+      if ($employeesJson === false) {
+        $employeesJson = json_encode(array_values($employeesArr), JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '[]';
+      }
+      $dataJson = json_encode($dataArr, JSON_UNESCAPED_UNICODE);
+      if ($dataJson === false) {
+        $dataJson = json_encode($dataArr, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
+      }
+      $payloadJson = json_encode($payloadArr, JSON_UNESCAPED_UNICODE);
+      if ($payloadJson === false) {
+        $payloadJson = json_encode($payloadArr, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
+      }
+      $viewStartPayload = $payloadArr['viewStart'] ?? ($payloadArr['start'] ?? ($payloadArr['view_start'] ?? ''));
+      $viewEndPayload = $payloadArr['viewEnd'] ?? ($payloadArr['end'] ?? ($payloadArr['view_end'] ?? ''));
+      $rowForBuild = [
+        'id' => $stateRow['version'] ?? null,
+        'team' => $team,
+        'view_start' => $viewStartPayload,
+        'view_end' => $viewEndPayload,
+        'employees' => $employeesJson,
+        'data' => $dataJson,
+        'note' => $payloadArr['note'] ?? '',
+        'created_at' => $stateRow['updated_at'] ?? null,
+        'created_by_name' => $stateRow['updated_by'] ?? null,
+        'payload' => $payloadJson,
+      ];
+      $result = build_schedule_payload($rowForBuild, $team);
+      $version = isset($stateRow['version']) ? (int)$stateRow['version'] : null;
+      $result['versionId'] = $version;
+      $result['version_id'] = $version;
+      $result['updated_at'] = $stateRow['updated_at'] ?? null;
+      $result['updated_by'] = $stateRow['updated_by'] ?? null;
+      $result['lastBackupAt'] = $stateRow['last_backup_at'] ?? null;
+      $rangeStart = $start ?: ($result['viewStart'] ?? null);
+      $result['historyProfile'] = compute_history_profile($pdo, $team, $rangeStart, $historyYearStart);
+      send_json($result);
+    }
+
     $row = null;
     if ($start && $end) {
       $stmt = $pdo->prepare("
@@ -554,7 +698,7 @@ switch (true) {
       send_json($result);
     }
 
-  // 保存（新版本）——乐观锁：baseVersionId 不等于最新时返回 409
+  // 保存（实时版本）——基于团队状态的乐观锁
   case $method === 'POST' && $path === '/schedule/save':
     $in   = json_input();
     $team = (string)($in['team'] ?? 'default');
@@ -571,23 +715,24 @@ switch (true) {
     }
 
     $pdo = db();
-    $stmt = $pdo->prepare("
-      SELECT id FROM schedule_versions
-      WHERE team=? AND view_start=? AND view_end=?
-      ORDER BY id DESC LIMIT 1
-    ");
-    $stmt->execute([$team, $vs, $ve]);
-    $cur = $stmt->fetch();
-    $latestId = $cur ? (int)$cur['id'] : null;
+    $now = now_local();
+    $pdo->beginTransaction();
+    try {
+      $stmt = $pdo->prepare('SELECT version, last_backup_at FROM team_states WHERE team=? LIMIT 1');
+      $stmt->execute([$team]);
+      $stateRow = $stmt->fetch();
+      $currentVersion = $stateRow ? (int)$stateRow['version'] : null;
+      $lastBackupAt = $stateRow['last_backup_at'] ?? null;
 
-    if ($latestId !== null && $base !== null && (int)$base !== $latestId) {
-      send_error('保存冲突：已有新版本', 409, ['code'=>409,'latest_version_id'=>$latestId]);
-    }
+      if ($currentVersion !== null && $base !== null && (int)$base !== $currentVersion) {
+        $pdo->rollBack();
+        send_error('保存冲突：已有新版本', 409, ['code' => 409, 'latest_version_id' => $currentVersion]);
+      }
 
-    $snapshot = [
-      'team' => $team,
-      'viewStart' => $vs,
-      'viewEnd' => $ve,
+      $snapshot = [
+        'team' => $team,
+        'viewStart' => $vs,
+        'viewEnd' => $ve,
       'start' => $vs,
       'end' => $ve,
       'employees' => array_values($emps),
@@ -619,34 +764,100 @@ switch (true) {
       'yearlyOptimize' => $in['yearlyOptimize'] ?? null,
       'operator' => $operator ?: '管理员',
     ];
-    $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE);
-    if ($snapshotJson === false) {
-      $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
-    }
+      $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE);
+      if ($snapshotJson === false) {
+        $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
+      }
 
-    $employeesJson = json_encode(array_values($emps), JSON_UNESCAPED_UNICODE);
-    if ($employeesJson === false) {
-      $employeesJson = json_encode(array_values($emps), JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '[]';
-    }
-    $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE);
-    if ($dataJson === false) {
-      $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
-    }
+      $newVersion = ($currentVersion ?? 0) + 1;
 
-    $stmt = $pdo->prepare("
-      INSERT INTO schedule_versions(team, view_start, view_end, employees, data, note, created_by_name, payload)
-      VALUES(?,?,?,?,?,?,?,?)
-    ");
-    $stmt->execute([
-      $team, $vs, $ve,
-      $employeesJson,
-      $dataJson,
-      $note,
-      $operator ?: '管理员',
-      $snapshotJson
+      if ($currentVersion === null) {
+        $stmt = $pdo->prepare('INSERT INTO team_states(team, payload, version, updated_at, updated_by, last_backup_at) VALUES(?,?,?,?,?,NULL)');
+        $stmt->execute([$team, $snapshotJson, $newVersion, $now, $operator ?: '管理员']);
+      } else {
+        $stmt = $pdo->prepare('UPDATE team_states SET payload=?, version=?, updated_at=?, updated_by=? WHERE team=?');
+        $stmt->execute([$snapshotJson, $newVersion, $now, $operator ?: '管理员', $team]);
+      }
+
+      $settings = backup_settings($pdo);
+      $intervalMinutes = max(1, (int)($settings['interval'] ?? 10));
+      $limitCount = max(1, (int)($settings['limit'] ?? 50));
+
+      $shouldBackup = false;
+      if (!$lastBackupAt) {
+        $shouldBackup = true;
+      } else {
+        $lastTs = strtotime((string)$lastBackupAt);
+        if ($lastTs === false) {
+          $shouldBackup = true;
+        } else {
+          $shouldBackup = (strtotime($now) - $lastTs) >= ($intervalMinutes * 60);
+        }
+      }
+
+      $backupCreatedAt = $lastBackupAt;
+      if ($shouldBackup) {
+        $employeesJson = json_encode(array_values($emps), JSON_UNESCAPED_UNICODE);
+        if ($employeesJson === false) {
+          $employeesJson = json_encode(array_values($emps), JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '[]';
+        }
+        $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE);
+        if ($dataJson === false) {
+          $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
+        }
+        $stmt = $pdo->prepare("
+          INSERT INTO schedule_versions(team, view_start, view_end, employees, data, note, created_by_name, payload)
+          VALUES(?,?,?,?,?,?,?,?)
+        ");
+        $stmt->execute([
+          $team,
+          $vs,
+          $ve,
+          $employeesJson,
+          $dataJson,
+          $note !== '' ? $note : '自动备份',
+          $operator ?: '管理员',
+          $snapshotJson,
+        ]);
+        $backupCreatedAt = $now;
+
+        if ($limitCount > 0) {
+          $stmt = $pdo->prepare('SELECT id FROM schedule_versions WHERE team=? ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?');
+          $stmt->execute([$team, $limitCount]);
+          $toDelete = $stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+          if ($toDelete) {
+            $placeholders = implode(',', array_fill(0, count($toDelete), '?'));
+            $del = $pdo->prepare("DELETE FROM schedule_versions WHERE id IN ($placeholders)");
+            $del->execute($toDelete);
+          }
+        }
+
+        $stmt = $pdo->prepare('UPDATE team_states SET last_backup_at=? WHERE team=?');
+        $stmt->execute([$backupCreatedAt, $team]);
+      }
+
+      $summary = sprintf('更新排班：%s ~ %s，人员 %d 名', $vs, $ve, count($emps));
+      if ($note !== '') {
+        $summary .= '，备注：' . $note;
+      }
+      append_team_log($pdo, $team, $operator ?: '管理员', 'update_schedule', $summary);
+
+      $pdo->commit();
+    } catch (Throwable $e) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      throw $e;
+    }
+    send_json([
+      'ok' => true,
+      'version_id' => $newVersion,
+      'versionId' => $newVersion,
+      'updated_at' => $now,
+      'updatedAt' => $now,
+      'last_backup_at' => $backupCreatedAt,
+      'lastBackupAt' => $backupCreatedAt,
     ]);
-    $newId = (int)$pdo->lastInsertId();
-    send_json(['ok'=>true, 'version_id'=>$newId]);
 
   // 历史版本列表
   case $method === 'GET' && $path === '/schedule/versions':
@@ -723,6 +934,27 @@ switch (true) {
     if ($stmt->rowCount() === 0) send_error('记录不存在或已删除', 404);
     send_json(['ok' => true, 'deleted' => true]);
 
+  case $method === 'GET' && $path === '/team/logs':
+    $team = trim((string)($_GET['team'] ?? ''));
+    $limit = (int)($_GET['limit'] ?? 50);
+    if ($team === '') send_error('参数缺失', 400);
+    if ($limit <= 0) $limit = 50;
+    if ($limit > 200) $limit = 200;
+    $pdo = db();
+    $stmt = $pdo->prepare('SELECT id, operator, action, detail, created_at FROM team_activity_logs WHERE team=? ORDER BY created_at DESC, id DESC LIMIT ?');
+    $stmt->execute([$team, $limit]);
+    $rows = $stmt->fetchAll() ?: [];
+    $logs = array_map(function($row) {
+      return [
+        'id' => isset($row['id']) ? (int)$row['id'] : null,
+        'operator' => $row['operator'] ?? '管理员',
+        'action' => $row['action'] ?? '',
+        'detail' => $row['detail'] ?? '',
+        'created_at' => $row['created_at'] ?? null,
+      ];
+    }, $rows);
+    send_json(['logs' => $logs]);
+
   case $method === 'GET' && $path === '/org-config':
     $pdo = db();
     $stmt = $pdo->query('SELECT payload, updated_at FROM org_config WHERE id = 1 LIMIT 1');
@@ -762,6 +994,7 @@ switch (true) {
       ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at
     ");
     $stmt->execute([$json]);
+    fetch_org_config_payload($pdo, true);
     send_json(['ok' => true]);
 
   case $method === 'GET' && $path === '/template/xlsx':
