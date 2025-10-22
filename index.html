@@ -1595,6 +1595,141 @@
         };
       }
 
+      function safeParseSnapshot(serialized){
+        if(typeof serialized !== 'string' || !serialized) return null;
+        try { return JSON.parse(serialized); } catch { return null; }
+      }
+
+      function cloneDataMap(data){
+        if(!data || typeof data !== 'object') return {};
+        const next = {};
+        Object.keys(data).forEach(day=>{
+          const row = data[day];
+          next[day] = row && typeof row === 'object' ? { ...row } : {};
+        });
+        return next;
+      }
+
+      function computeDataDiff(baseSnapshot, localSnapshot){
+        if(!baseSnapshot || !localSnapshot) return [];
+        const baseData = (baseSnapshot && typeof baseSnapshot.data === 'object') ? baseSnapshot.data : {};
+        const localData = (localSnapshot && typeof localSnapshot.data === 'object') ? localSnapshot.data : {};
+        const days = new Set([...Object.keys(baseData), ...Object.keys(localData)]);
+        const changes = [];
+        days.forEach(day=>{
+          const baseRow = baseData[day] || {};
+          const localRow = localData[day] || {};
+          const emps = new Set([...Object.keys(baseRow), ...Object.keys(localRow)]);
+          emps.forEach(emp=>{
+            const baseVal = (baseRow[emp] ?? '').toString();
+            const localValRaw = localRow[emp];
+            const localVal = localValRaw === undefined || localValRaw === null ? '' : String(localValRaw);
+            if(localVal !== baseVal){
+              changes.push({ day, emp, baseVal, value: localVal });
+            }
+          });
+        });
+        return changes;
+      }
+
+      function jsonEquals(a, b){
+        if(a === b) return true;
+        try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+      }
+
+      async function fetchLatestSchedulePayload(){
+        if(!team){
+          throw new Error('尚未选择团队，无法加载最新排班');
+        }
+        const params = new URLSearchParams();
+        if(team) params.set('team', team);
+        if(planStart) params.set('start', planStart);
+        if(planEnd) params.set('end', planEnd);
+        if(yearlyOptimize){
+          const yrMatch = (planStart || '').match(/^(\d{4})/);
+          if(yrMatch){
+            params.set('historyYearStart', `${yrMatch[1]}-01-01`);
+            params.set('yearOptimize', '1');
+          }
+        }
+        const query = params.toString();
+        const res = await apiGet(`/schedule${query ? `?${query}` : ''}`);
+        return { ...res, versionId: res.version_id || res.versionId };
+      }
+
+      async function resolveSaveConflict(reason, localSnapshot, options = {}){
+        let latestPayload;
+        try {
+          latestPayload = await fetchLatestSchedulePayload();
+        } catch(err){
+          globalErr(err?.message || '加载最新排班失败');
+          return { applied: 0, skipped: 0 };
+        }
+        if(!latestPayload){
+          return { applied: 0, skipped: 0 };
+        }
+        const baseSnapshot = safeParseSnapshot(lastSavedSnapshotRef.current);
+        const mergedPayload = { ...latestPayload };
+        const mergedData = cloneDataMap(latestPayload.data || {});
+        const baseData = baseSnapshot && typeof baseSnapshot.data === 'object' ? baseSnapshot.data : {};
+        const localData = localSnapshot && typeof localSnapshot.data === 'object' ? localSnapshot.data : {};
+        const diffs = baseSnapshot && localSnapshot ? computeDataDiff(baseSnapshot, localSnapshot) : [];
+        let applied = 0;
+        let skipped = 0;
+        diffs.forEach(diff=>{
+          const serverRow = mergedData[diff.day] || {};
+          const serverVal = serverRow[diff.emp] ?? '';
+          const expectVal = (baseData[diff.day] || {})[diff.emp] ?? '';
+          if(String(serverVal) === String(expectVal)){
+            if(!mergedData[diff.day]) mergedData[diff.day] = {};
+            mergedData[diff.day][diff.emp] = diff.value;
+            applied += 1;
+          } else {
+            skipped += 1;
+          }
+        });
+        mergedPayload.data = mergedData;
+        if(baseSnapshot && localSnapshot){
+          const baseNote = typeof baseSnapshot.note === 'string' ? baseSnapshot.note : '';
+          const serverNote = typeof latestPayload.note === 'string' ? latestPayload.note : '';
+          if(serverNote === baseNote && typeof localSnapshot.note === 'string' && localSnapshot.note !== baseNote){
+            mergedPayload.note = localSnapshot.note;
+            applied += 1;
+          }
+          const mergeableFields = ['adminDays','restPrefs','nightRules','nightWindows','nightOverride','rMin','rMax','pMin','pMax','mixMax','shiftColors','staffingAlerts','batchChecked','albumSelected','albumWhiteHour','albumMidHour','albumRangeStartMonth','albumRangeEndMonth','albumMaxDiff','albumAssignments','albumAutoNote','albumHistory','historyProfile','yearlyOptimize'];
+          mergeableFields.forEach(field=>{
+            const baseVal = baseSnapshot[field];
+            const serverVal = latestPayload[field];
+            const localVal = localSnapshot[field];
+            if(localVal !== undefined && !jsonEquals(localVal, baseVal) && jsonEquals(serverVal, baseVal)){
+              mergedPayload[field] = Array.isArray(localVal) ? localVal.slice() : (localVal && typeof localVal === 'object' ? JSON.parse(JSON.stringify(localVal)) : localVal);
+              applied += 1;
+            }
+          });
+        }
+        applyServerState({ ...mergedPayload, versionId: mergedPayload.versionId ?? mergedPayload.version_id ?? null });
+        skipSaveRef.current = false;
+        const latestVersion = mergedPayload.versionId ?? mergedPayload.version_id ?? null;
+        if(team && latestVersion){
+          lastLoadedVersionRef.current[team] = latestVersion;
+        }
+        if(team){
+          initialTeamSyncRef.current[team] = true;
+        }
+        if(applied > 0){
+          pendingAutoSaveRef.current = true;
+          lastSavedSnapshotRef.current = '';
+          setTimeout(()=> setAutoSaveTicker(tick=> tick + 1), 0);
+        } else {
+          pendingAutoSaveRef.current = false;
+        }
+        const msg = skipped > 0
+          ? `检测到其他账号已保存新版本，已同步最新数据，${skipped} 项本地改动因冲突未自动合并，请手动确认。`
+          : '检测到其他账号已保存新版本，已同步最新数据并保留本地改动。';
+        showToast(msg, skipped > 0 ? 'error' : 'info');
+        return { applied, skipped };
+      }
+
       async function triggerAutoSave(reason, options = {}){
         const { waitForResponse = false } = options;
         if(autoSaveSendingRef.current) return false;
@@ -1620,7 +1755,9 @@
             if(returnedVersion){
               setVersionId(returnedVersion);
               snapshotRef.current = { ...snapshotRef.current, versionId: returnedVersion };
-              lastLoadedVersionRef.current[team] = returnedVersion;
+              if(team){
+                lastLoadedVersionRef.current[team] = returnedVersion;
+              }
             }
             if(serializedSnapshot){
               lastSavedSnapshotRef.current = serializedSnapshot;
@@ -1629,8 +1766,12 @@
             autoSaveSendingRef.current = false;
             return true;
           }catch(error){
-            console.warn('自动保存失败', reason, error);
             autoSaveSendingRef.current = false;
+            if(error?.payload && error.payload.code === 409){
+              await resolveSaveConflict(reason, snapshot);
+              return false;
+            }
+            console.warn('自动保存失败', reason, error);
             pendingAutoSaveRef.current = true;
             setAutoSaveTicker(tick=> tick + 1);
             return false;
@@ -1705,20 +1846,7 @@
 
       async function loadFromServer(){
         try {
-          const params = new URLSearchParams();
-          if(team) params.set('team', team);
-          if(planStart) params.set('start', planStart);
-          if(planEnd) params.set('end', planEnd);
-          if(yearlyOptimize){
-            const yrMatch = (planStart || '').match(/^(\d{4})/);
-            if(yrMatch){
-              params.set('historyYearStart', `${yrMatch[1]}-01-01`);
-              params.set('yearOptimize', '1');
-            }
-          }
-          const query = params.toString();
-          const res = await apiGet(`/schedule?${query}`);
-          const payload = { ...res, versionId: res.version_id || res.versionId };
+          const payload = await fetchLatestSchedulePayload();
           applyServerState(payload);
           const latestVersion = payload.versionId;
           if(latestVersion){
@@ -1732,6 +1860,7 @@
         }
       }
       async function saveToServer(){
+        const snapshotBeforeSave = snapshotRef.current;
         try{
           const payload = buildSavePayload();
           const res = await apiPost('/schedule/save', payload);
@@ -1749,8 +1878,8 @@
             loadVersions();
           }
         } catch(e){
-          if(e.payload && e.payload.code===409){
-            if(confirm('服务器已有新版本，是否加载最新并覆盖？')) await loadFromServer();
+          if(e?.payload && e.payload.code===409){
+            await resolveSaveConflict('manual-save', snapshotBeforeSave, { manual:true });
             return;
           }
           globalErr(e.message);
@@ -2451,9 +2580,9 @@
                 <div className="font-medium text-gray-700">每日比例（中1:白）</div>
                 <div className="flex items-center gap-2">
                   <span>1 :</span>
-                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={rMin} onChange={(e)=> setRMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
+                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={rMin} onChange={(e)=> setRMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                   <span>~</span>
-                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={rMax} onChange={(e)=> setRMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
+                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={rMax} onChange={(e)=> setRMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                   <span className="text-gray-400">（示例：1:0.4~0.6）</span>
                 </div>
               </div>
@@ -2461,9 +2590,9 @@
                 <div className="font-medium text-gray-700">个人比例（中1:白）</div>
                 <div className="flex items-center gap-2">
                   <span>1 :</span>
-                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={pMin} onChange={(e)=> setPMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
+                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={pMin} onChange={(e)=> setPMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                   <span>~</span>
-                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={pMax} onChange={(e)=> setPMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
+                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={pMax} onChange={(e)=> setPMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                   <span className="text-gray-400">（示例：1:0.4~0.6）</span>
                 </div>
               </div>
@@ -2472,13 +2601,13 @@
               <div className="font-medium text-gray-700">混合周期上限（比例）</div>
               <div className="flex items-center gap-2 text-sm">
                 <span>混合周期 ≤ 总周期 ×</span>
-                <input type="number" step="0.05" min="0" max="1" className="w-24 border rounded px-2 py-1" value={mixMax} onChange={(e)=> setMixMax(Math.max(0, Math.min(1, parseFloat(e.target.value||'0'))))} />
+                <input type="number" step="0.05" min="0" max="1" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={mixMax} onChange={(e)=> setMixMax(Math.max(0, Math.min(1, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                 <span className="text-gray-400">（例如：0.5 表示有白且有中的周期不超过一半）</span>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
-              <PillBtn color="indigo" onClick={runMainRule} disabled={prog.running}>开始自动排班</PillBtn>
+              <PillBtn color="indigo" onClick={runMainRule} disabled={editingLocked} title={editingLocked ? '当前账号仅支持查看，无法执行自动排班' : ''}>开始自动排班</PillBtn>
             </div>
 
             <div className="text-xs text-gray-500">规则说明：① 全程禁止生成“中1→白”相邻；② 严格遵守最多 6 天连续上班；③ 混合周期（白+中1 同在一周期）不超过设定比例；④ 夜/中2 不参与本算法但保留；⑤ 多轮“按天→按人”收敛，优先确保你的目标约束而非速度。</div>
@@ -2493,22 +2622,22 @@
             <div className="space-y-2">
               {nightWindows.map((w,i)=> (
                 <div key={i} className="flex flex-wrap items-end gap-2">
-                  <label className="text-sm">开始 <input type="date" value={w.s} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], s:e.target.value}; return a; })} className="border rounded px-2 py-1 ml-1"/></label>
-                  <label className="text-sm">结束 <input type="date" value={w.e} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], e:e.target.value}; return a; })} className="border rounded px-2 py-1 ml-1"/></label>
-                  <button className="px-2 py-1 border rounded" onClick={()=> setNightWindows(arr=> arr.filter((_,idx)=> idx!==i))}>删除</button>
+                  <label className="text-sm">开始 <input type="date" value={w.s} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], s:e.target.value}; return a; })} className={`border rounded px-2 py-1 ml-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} disabled={editingLocked}/></label>
+                  <label className="text-sm">结束 <input type="date" value={w.e} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], e:e.target.value}; return a; })} className={`border rounded px-2 py-1 ml-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} disabled={editingLocked}/></label>
+                  <button className={`px-2 py-1 border rounded ${editingLocked?'opacity-50 cursor-not-allowed':''}`} onClick={()=> setNightWindows(arr=> arr.filter((_,idx)=> idx!==i))} disabled={editingLocked}>删除</button>
                 </div>
               ))}
-              <button className="px-3 py-1.5 border rounded" onClick={()=> setNightWindows(a=> [...a, {s:planStart,e:planEnd}])}>新增一段</button>
+              <button className={`px-3 py-1.5 border rounded ${editingLocked?'opacity-50 cursor-not-allowed':''}`} onClick={()=> setNightWindows(a=> [...a, {s:planStart,e:planEnd}])} disabled={editingLocked}>新增一段</button>
             </div>
 
             <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightOverride} onChange={e=> setNightOverride(e.target.checked)} /> 应用夜/中2时允许覆盖现有班次</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.prioritizeInterval} onChange={e=> setNightRules(r=>({...r, prioritizeInterval:e.target.checked}))}/> 夜班按间隔优先分配</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterNight} onChange={e=> setNightRules(r=>({...r, restAfterNight:e.target.checked}))}/> 夜班后休息 2 天</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.enforceRestCap} onChange={e=> setNightRules(r=>({...r, enforceRestCap:e.target.checked}))}/> 夜后休息不超过 2 天</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterMid2} onChange={e=> setNightRules(r=>({...r, restAfterMid2:e.target.checked}))}/> 中2 后休息 2 天</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowDoubleMid2} onChange={e=> setNightRules(r=>({...r, allowDoubleMid2:e.target.checked}))}/> 允许连续 2 个中2</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowNightDay4} onChange={e=> setNightRules(r=>({...r, allowNightDay4:e.target.checked}))}/> 支持周期第 4 天排夜班</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightOverride} onChange={e=> setNightOverride(e.target.checked)} disabled={editingLocked} /> 应用夜/中2时允许覆盖现有班次</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.prioritizeInterval} onChange={e=> setNightRules(r=>({...r, prioritizeInterval:e.target.checked}))} disabled={editingLocked}/> 夜班按间隔优先分配</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterNight} onChange={e=> setNightRules(r=>({...r, restAfterNight:e.target.checked}))} disabled={editingLocked}/> 夜班后休息 2 天</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.enforceRestCap} onChange={e=> setNightRules(r=>({...r, enforceRestCap:e.target.checked}))} disabled={editingLocked}/> 夜后休息不超过 2 天</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterMid2} onChange={e=> setNightRules(r=>({...r, restAfterMid2:e.target.checked}))} disabled={editingLocked}/> 中2 后休息 2 天</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowDoubleMid2} onChange={e=> setNightRules(r=>({...r, allowDoubleMid2:e.target.checked}))} disabled={editingLocked}/> 允许连续 2 个中2</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowNightDay4} onChange={e=> setNightRules(r=>({...r, allowNightDay4:e.target.checked}))} disabled={editingLocked}/> 支持周期第 4 天排夜班</label>
             </div>
 
             <div className="flex flex-wrap items-center gap-3 mt-3 text-sm">
@@ -2517,7 +2646,7 @@
                 let newD={...data};
                 for(const w of nightWindows){ if(!w.s||!w.e) continue; newD = autoAssignNightAndM2({ employees: checkedList, data:newD, start:w.s, end:w.e, override: nightOverride, nightRules, restPrefs }); }
                 setData(newD);
-              }}>AI 一键分配 夜/中2（按窗口，多段）</PillBtn>
+              }} disabled={editingLocked} title={editingLocked ? '当前账号仅支持查看，无法执行自动排班' : ''}>AI 一键分配 夜/中2（按窗口，多段）</PillBtn>
               <span className="text-xs text-gray-500">规则：夜后两天必须休；夜后两天禁止该员工中2；中2后一天强制休。</span>
             </div>
           </div>
@@ -2711,7 +2840,7 @@
       };
 
       const autoAssignAlbum = ()=>{
-        if(editingLocked){ alert('执行中：请稍后再试'); return; }
+        if(editingLocked){ alert('当前账号仅支持查看，无法执行自动排班'); return; }
         if(albumCheckedList.length===0){ alert('请先在左侧勾选参与专辑审核的人员'); return; }
         if(albumDates.length===0){ alert('请先设置有效的月份范围，并确保与当前排班范围有交集'); return; }
         const diffLimitRaw = Number(albumMaxDiff);
@@ -2729,6 +2858,7 @@
       };
 
       const updateAlbumAssignment = (day, field, value)=>{
+        if(editingLocked) return;
         setAlbumAssignments(prev=> ({
           ...prev,
           [day]: { ...(prev?.[day]||{ white:'', mid:'' }), [field]: value }
@@ -2745,14 +2875,14 @@
                 <div className="grid grid-cols-1 gap-2 text-sm text-gray-600">
                   <label className="flex items-center justify-between gap-2">开始月份<MonthInput className="border rounded px-2 py-1" value={albumRangeStartMonth} onChange={setAlbumRangeStartMonth} disabled={editingLocked} /></label>
                   <label className="flex items-center justify-between gap-2">结束月份<MonthInput className="border rounded px-2 py-1" value={albumRangeEndMonth} onChange={setAlbumRangeEndMonth} disabled={editingLocked} /></label>
-                  <label className="flex items-center justify-between gap-2">白班时长（小时）<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumWhiteHour}
-                    onChange={e=> setAlbumWhiteHour(Number.parseFloat(e.target.value||'0')||0)} /></label>
-                  <label className="flex items-center justify-between gap-2">中1时长（小时）<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumMidHour}
-                    onChange={e=> setAlbumMidHour(Number.parseFloat(e.target.value||'0')||0)} /></label>
-                  <label className="flex items-center justify-between gap-2">允许时长差值 ±<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumMaxDiff}
-                    onChange={e=> setAlbumMaxDiff(e.target.value===''?0:Number.parseFloat(e.target.value)||0)} /></label>
+                  <label className="flex items-center justify-between gap-2">白班时长（小时）<input type="number" step="0.01" min="0" className={`border rounded px-2 py-1 w-24 text-right ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={albumWhiteHour}
+                    onChange={e=> setAlbumWhiteHour(Number.parseFloat(e.target.value||'0')||0)} disabled={editingLocked} /></label>
+                  <label className="flex items-center justify-between gap-2">中1时长（小时）<input type="number" step="0.01" min="0" className={`border rounded px-2 py-1 w-24 text-right ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={albumMidHour}
+                    onChange={e=> setAlbumMidHour(Number.parseFloat(e.target.value||'0')||0)} disabled={editingLocked} /></label>
+                  <label className="flex items-center justify-between gap-2">允许时长差值 ±<input type="number" step="0.01" min="0" className={`border rounded px-2 py-1 w-24 text-right ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={albumMaxDiff}
+                    onChange={e=> setAlbumMaxDiff(e.target.value===''?0:Number.parseFloat(e.target.value)||0)} disabled={editingLocked} /></label>
                 </div>
-                <PillBtn color="indigo" onClick={autoAssignAlbum} disabled={editingLocked || albumCheckedList.length===0 || albumDates.length===0} title={albumCheckedList.length===0? '请先勾选人员': albumDates.length===0? '请先设置有效月份范围': (editingLocked?'执行中：只读':'' )}>智能生成专辑审核排班</PillBtn>
+                <PillBtn color="indigo" onClick={autoAssignAlbum} disabled={editingLocked || albumCheckedList.length===0 || albumDates.length===0} title={editingLocked ? '当前账号仅支持查看，无法执行自动排班' : (albumCheckedList.length===0? '请先勾选人员': albumDates.length===0? '请先设置有效月份范围': '')}>智能生成专辑审核排班</PillBtn>
                 {albumAutoNote && <div className="text-xs text-indigo-600 bg-indigo-50/80 border border-indigo-100 rounded-xl px-3 py-2">{albumAutoNote}</div>}
                 <div className="text-xs text-gray-500">提示：参数调整后可重新生成；排班结果支持右侧表格内手动微调。</div>
               </div>
@@ -2826,8 +2956,8 @@
                           const weekLabel = WN[new Date(day).getDay()];
                           const whiteCandidates = albumCheckedList.filter(emp=> (row[emp]||'')==='白');
                           const midCandidates = albumCheckedList.filter(emp=> (row[emp]||'')==='中1');
-                          const whiteClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.white ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'}`;
-                          const midClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.mid ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'}`;
+                          const whiteClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.white ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'} ${editingLocked?'opacity-60 cursor-not-allowed':''}`;
+                          const midClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.mid ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'} ${editingLocked?'opacity-60 cursor-not-allowed':''}`;
                           return (
                             <tr key={`album-${day}`} className="border-t hover:bg-indigo-50/20">
                               <td className="py-1.5 px-3 font-medium text-gray-700">{day}</td>
@@ -2837,7 +2967,8 @@
                                   className={whiteClass}
                                   value={info.white || ''}
                                   onChange={e=> updateAlbumAssignment(day, 'white', e.target.value)}
-                                  title={whiteCandidates.length===0 ? '当日无白班可选' : '请选择白班审核人'}
+                                  title={editingLocked ? '当前账号仅支持查看' : (whiteCandidates.length===0 ? '当日无白班可选' : '请选择白班审核人')}
+                                  disabled={editingLocked}
                                 >
                                   <option value="">未分配</option>
                                   {whiteCandidates.map(emp=> (
@@ -2850,7 +2981,8 @@
                                   className={midClass}
                                   value={info.mid || ''}
                                   onChange={e=> updateAlbumAssignment(day, 'mid', e.target.value)}
-                                  title={midCandidates.length===0 ? '当日无中1可选' : '请选择中班审核人'}
+                                  title={editingLocked ? '当前账号仅支持查看' : (midCandidates.length===0 ? '当日无中1可选' : '请选择中班审核人')}
+                                  disabled={editingLocked}
                                 >
                                   <option value="">未分配</option>
                                   {midCandidates.map(emp=> (
@@ -3946,10 +4078,14 @@
         </Section>
       );
 
+      const userDisplayName = user ? (user.display_name || user.displayName || user.username || '访客') : '';
       const Topbar = (
         <div className="sticky top-0 z-30 bg-gradient-to-b from-white/90 to-white/60 backdrop-blur border-b">
           <div className="layout-shell py-3 flex items-center gap-3">
-            <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:gap-3 gap-1">
+              <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
+              {userDisplayName && <span className="text-sm text-gray-500">您好，{userDisplayName}</span>}
+            </div>
             <div className="flex-1"></div>
             <div className="flex lg:hidden items-center gap-2 text-sm mr-2">
               <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
@@ -3962,7 +4098,11 @@
             </div>
             <div className="flex items-center gap-2">
               <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked}>导出</PillBtn>
-              {user ? (<button onClick={async()=>{ await apiPost('/logout',{}).catch(()=>{}); setUser(null); }} className={`px-3 py-1.5 rounded-full text-sm ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={editingLocked}>退出</button>) : (<span className="text-xs text-gray-500">未登录</span>)}
+              {user ? (
+                <button onClick={doLogout} className={`px-3 py-1.5 rounded-full text-sm ${prog.running?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={prog.running}>退出</button>
+              ) : (
+                <span className="text-xs text-gray-500">未登录</span>
+              )}
             </div>
           </div>
           {Object.keys(nightIssues).length>0 && (
