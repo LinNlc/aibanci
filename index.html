@@ -943,6 +943,7 @@
       const snapshotRef = useRef(null);
       const lastSavedSnapshotRef = useRef('');
       const pendingAutoSaveRef = useRef(false);
+      const [autoSaveTicker, setAutoSaveTicker] = useState(0);
       const autoSaveSendingRef = useRef(false);
       const initialTeamSyncRef = useRef({});
 
@@ -1054,7 +1055,11 @@
         if(serialized && serialized === lastSavedSnapshotRef.current){
           pendingAutoSaveRef.current = false;
         } else {
-          pendingAutoSaveRef.current = snapshotHasMeaningfulData(snapshotForRef) && serialized !== lastSavedSnapshotRef.current;
+          const shouldQueue = snapshotHasMeaningfulData(snapshotForRef) && serialized !== lastSavedSnapshotRef.current;
+          pendingAutoSaveRef.current = shouldQueue;
+          if(shouldQueue){
+            setAutoSaveTicker(tick=> tick + 1);
+          }
         }
         skipLoadRef.current = true;
         setTeamStateMap(prev=> ({ ...prev, [team]: snapshot }));
@@ -1590,7 +1595,8 @@
         };
       }
 
-      function triggerAutoSave(reason){
+      async function triggerAutoSave(reason, options = {}){
+        const { waitForResponse = false } = options;
         if(autoSaveSendingRef.current) return false;
         if(!pendingAutoSaveRef.current) return false;
         const snapshot = snapshotRef.current;
@@ -1604,9 +1610,39 @@
         }catch(e){
           return false;
         }
-        let body;
-        try{ body = JSON.stringify(payload); } catch(e){ return false; }
+        let serializedSnapshot = '';
+        try{ serializedSnapshot = JSON.stringify(snapshot); }catch(e){ serializedSnapshot = ''; }
         autoSaveSendingRef.current = true;
+        if(waitForResponse){
+          try{
+            const res = await apiPost('/schedule/save', payload);
+            const returnedVersion = res && (res.version_id || res.versionId);
+            if(returnedVersion){
+              setVersionId(returnedVersion);
+              snapshotRef.current = { ...snapshotRef.current, versionId: returnedVersion };
+              lastLoadedVersionRef.current[team] = returnedVersion;
+            }
+            if(serializedSnapshot){
+              lastSavedSnapshotRef.current = serializedSnapshot;
+            }
+            pendingAutoSaveRef.current = false;
+            autoSaveSendingRef.current = false;
+            return true;
+          }catch(error){
+            console.warn('自动保存失败', reason, error);
+            autoSaveSendingRef.current = false;
+            pendingAutoSaveRef.current = true;
+            setAutoSaveTicker(tick=> tick + 1);
+            return false;
+          }
+        }
+        let body;
+        try{ body = JSON.stringify(payload); } catch(e){
+          autoSaveSendingRef.current = false;
+          pendingAutoSaveRef.current = true;
+          setAutoSaveTicker(tick=> tick + 1);
+          return false;
+        }
         let sent = false;
         if(typeof navigator !== 'undefined' && navigator.sendBeacon){
           try{
@@ -1625,9 +1661,9 @@
             }).catch(()=>{});
           }catch(e){}
         }
-        try{
-          lastSavedSnapshotRef.current = JSON.stringify(snapshot);
-        }catch(e){
+        if(serializedSnapshot){
+          lastSavedSnapshotRef.current = serializedSnapshot;
+        } else {
           lastSavedSnapshotRef.current = body;
         }
         pendingAutoSaveRef.current = false;
@@ -1638,13 +1674,34 @@
       useEffect(()=>{
         const handleBeforeUnload = ()=>{ try{ triggerAutoSave('beforeunload'); }catch(e){} };
         const handlePageHide = ()=>{ try{ triggerAutoSave('pagehide'); }catch(e){} };
+        const handleVisibility = ()=>{
+          if(document.visibilityState === 'hidden'){
+            triggerAutoSave('visibilitychange');
+          }
+        };
         window.addEventListener('beforeunload', handleBeforeUnload);
         window.addEventListener('pagehide', handlePageHide);
+        document.addEventListener('visibilitychange', handleVisibility);
         return ()=>{
           window.removeEventListener('beforeunload', handleBeforeUnload);
           window.removeEventListener('pagehide', handlePageHide);
+          document.removeEventListener('visibilitychange', handleVisibility);
         };
       }, []);
+
+      useEffect(()=>{
+        if(!autoSaveTicker) return;
+        if(!pendingAutoSaveRef.current) return;
+        let cancelled = false;
+        const timer = setTimeout(()=>{
+          if(cancelled) return;
+          triggerAutoSave('debounce', { waitForResponse:true });
+        }, 2500);
+        return ()=>{
+          cancelled = true;
+          clearTimeout(timer);
+        };
+      }, [autoSaveTicker, team]);
 
       async function loadFromServer(){
         try {
