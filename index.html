@@ -54,7 +54,7 @@
   <script src="static/js/scheduler-algorithms.js"></script>
 
   <script type="text/babel" data-presets="env,react">
-    const { useState, useMemo, useEffect, useRef, useCallback } = React;
+    const { useState, useMemo, useEffect, useRef, useCallback, useLayoutEffect } = React;
 
     function globalErr(msg){ const bar = document.getElementById('errbar'); if(bar){ bar.textContent = '错误：' + msg; bar.className = 'show bg-red-50 text-red-700 text-sm px-4 py-2'; } }
     window.addEventListener('error', (e)=> globalErr(e?.message || '脚本错误'));
@@ -248,6 +248,39 @@
         borderRadius: '999px',
         padding: '0 0.35rem'
       };
+    }
+    const AUTO_SAVE_SUFFIX = '自动保存';
+    function extractUserNames(user){
+      if(!user) return { username:'', display:'' };
+      const username = typeof user.username === 'string' ? user.username.trim() : '';
+      const displayRaw = typeof user.display_name === 'string' ? user.display_name : user.displayName;
+      const display = typeof displayRaw === 'string' ? displayRaw.trim() : '';
+      return { username, display };
+    }
+    function formatUserDisplayName(user){
+      const { username, display } = extractUserNames(user);
+      if(display) return display;
+      if(username) return username;
+      return '';
+    }
+    function formatOperatorLabel(user){
+      const { username, display } = extractUserNames(user);
+      if(username && display && username !== display){
+        return `${username}（${display}）`;
+      }
+      if(display) return display;
+      if(username) return username;
+      return '管理员';
+    }
+    function formatAutoSaveOperator(user){
+      const label = formatOperatorLabel(user);
+      if(!label) return AUTO_SAVE_SUFFIX;
+      if(label.endsWith(` ${AUTO_SAVE_SUFFIX}`)) return label;
+      return `${label} ${AUTO_SAVE_SUFFIX}`;
+    }
+    function isAutoSaveLabel(label){
+      if(!label || typeof label !== 'string') return false;
+      return label.trim().endsWith(AUTO_SAVE_SUFFIX);
     }
     function normalizeNightRules(raw){
       const defaults = {
@@ -657,7 +690,7 @@
             return;
           }
           persistLogin(remember, trimmedUsername, password);
-          onSuccess({ username: accountEntry.username, display_name: accountEntry.displayName || accountEntry.username, role: accountEntry.role, localAccount: true });
+          onSuccess({ username: accountEntry.username, display_name: accountEntry.displayName || '', role: accountEntry.role, localAccount: true });
           return;
         }
         try{
@@ -869,7 +902,7 @@
         if(showAutoSaves) return versions;
         return versions.filter(v=>{
           const operator = (v?.created_by_name || v?.created_by || '').trim();
-          return operator !== '自动保存';
+          return !isAutoSaveLabel(operator);
         });
       }, [versions, showAutoSaves]);
       const [versionDeletingId, setVersionDeletingId] = useState(null);
@@ -910,6 +943,7 @@
       const [albumAutoNote, setAlbumAutoNote] = useState('');
       const [albumHistory, setAlbumHistory] = useState([]);
       const [accountPasswordDrafts, setAccountPasswordDrafts] = useState({});
+      const [accountDisplayDrafts, setAccountDisplayDrafts] = useState({});
       const importInputRef = useRef(null);
       const [importing, setImporting] = useState(false);
 
@@ -1267,6 +1301,10 @@
           if(!(username in prev)) return prev;
           const next = { ...prev }; delete next[username]; return next;
         });
+        setAccountDisplayDrafts(prev=>{
+          if(!(username in prev)) return prev;
+          const next = { ...prev }; delete next[username]; return next;
+        });
         if(user && user.username === username){ setUser(null); }
       };
       const setAccountUsername = (username, nextUsername)=>{
@@ -1287,9 +1325,28 @@
           delete next[username];
           return next;
         });
+        setAccountDisplayDrafts(prev=>{
+          if(!(username in prev)) return prev;
+          const next = { ...prev };
+          next[trimmed] = next[username];
+          delete next[username];
+          return next;
+        });
         if(user && user.username === username){ setUser(prev=> prev? { ...prev, username: trimmed } : prev); }
       };
-      const setAccountDisplayName = (username, value)=> updateAccountConfig(username, acc=> ({ ...acc, displayName: value }));
+      const setAccountDisplayDraft = (username, value)=>{
+        setAccountDisplayDrafts(prev=> ({ ...prev, [username]: value }));
+      };
+      const setAccountDisplayName = (username, value)=>{
+        const nextValue = typeof value === 'string' ? value.trim() : '';
+        updateAccountConfig(username, acc=> ({ ...acc, displayName: nextValue }));
+        setAccountDisplayDrafts(prev=>{
+          if(!(username in prev)) return prev;
+          const next = { ...prev };
+          delete next[username];
+          return next;
+        });
+      };
       const setAccountRole = (username, role)=> updateAccountConfig(username, acc=> ({ ...acc, role }));
       const setAccountPassword = (username)=>{
         const raw = accountPasswordDrafts[username] || '';
@@ -1299,6 +1356,21 @@
       const updateAccountPasswordDraft = (username, value)=>{
         setAccountPasswordDrafts(prev=> ({ ...prev, [username]: value }));
       };
+      useEffect(()=>{
+        setAccountDisplayDrafts(prev=>{
+          const keep = {};
+          const valid = new Set((orgConfig.accounts||[]).map(acc=> acc.username));
+          let changed = false;
+          Object.entries(prev).forEach(([key, val])=>{
+            if(valid.has(key)){
+              keep[key] = val;
+            } else {
+              changed = true;
+            }
+          });
+          return changed ? keep : prev;
+        });
+      }, [orgConfig.accounts]);
       const updateAccountMenu = (username, key, field, value)=>{
         updateAccountConfig(username, acc=>{
           const baseMenus = defaultMenuPerms();
@@ -1567,7 +1639,7 @@
           data: base.data || data,
           baseVersionId: base.versionId ?? versionId,
           note: noteValue,
-          operator: options.operatorOverride ?? ((user && (user.display_name || user.username)) || '管理员'),
+          operator: options.operatorOverride ?? formatOperatorLabel(user),
           adminDays: base.adminDays ?? adminDays,
           restPrefs: base.restPrefs ?? sanitizeRestPrefsMap(restPrefs),
           nightRules: base.nightRules ?? normalizeNightRules(nightRules),
@@ -1738,9 +1810,11 @@
         if(!snapshot || !snapshotHasMeaningfulData(snapshot)) return false;
         let payload;
         try{
+          const autoOperator = formatAutoSaveOperator(user);
+          const autoNote = snapshot.note && snapshot.note.trim() ? snapshot.note : AUTO_SAVE_SUFFIX;
           payload = buildSavePayload({
-            operatorOverride: '自动保存',
-            noteOverride: snapshot.note && snapshot.note.trim() ? snapshot.note : '自动保存'
+            operatorOverride: autoOperator,
+            noteOverride: autoNote
           }, snapshot);
         }catch(e){
           return false;
@@ -2109,6 +2183,63 @@
         }
         return allDateKeys.filter(day=> (!s || day >= s) && (!e || day <= e));
       }, [planStart, planEnd, allDateKeys]);
+      const gridContainerRef = useRef(null);
+      const gridScrollRafRef = useRef(null);
+      const gridRowHeightRef = useRef(56);
+      const [gridScrollTop, setGridScrollTop] = useState(0);
+      const [gridViewportHeight, setGridViewportHeight] = useState(0);
+      const [gridRowHeight, setGridRowHeight] = useState(56);
+      useEffect(()=>{ gridRowHeightRef.current = gridRowHeight || 56; }, [gridRowHeight]);
+      const handleGridScroll = useCallback((event)=>{
+        const top = event.currentTarget ? event.currentTarget.scrollTop : 0;
+        if(gridScrollRafRef.current){
+          cancelAnimationFrame(gridScrollRafRef.current);
+        }
+        gridScrollRafRef.current = requestAnimationFrame(()=> setGridScrollTop(top));
+      }, []);
+      useEffect(()=>()=>{ if(gridScrollRafRef.current) cancelAnimationFrame(gridScrollRafRef.current); }, []);
+      useLayoutEffect(()=>{
+        const node = gridContainerRef.current;
+        if(!node) return;
+        const updateHeight = ()=>{
+          const next = node.clientHeight || 0;
+          setGridViewportHeight(prev=> Math.abs(prev - next) > 1 ? next : prev);
+        };
+        updateHeight();
+        if(typeof ResizeObserver !== 'undefined'){
+          const ro = new ResizeObserver(()=> updateHeight());
+          ro.observe(node);
+          return ()=> ro.disconnect();
+        }
+        const timer = setInterval(updateHeight, 500);
+        return ()=> clearInterval(timer);
+      }, [employees.length, dateList.length]);
+      useEffect(()=>{
+        setGridScrollTop(0);
+        const node = gridContainerRef.current;
+        if(node){
+          node.scrollTop = 0;
+        }
+      }, [team, viewStart, viewEnd, planStart, planEnd, employees.length]);
+      const measureRow = useCallback((node)=>{
+        if(node){
+          const rect = node.getBoundingClientRect();
+          const nextHeight = rect && rect.height ? rect.height : 0;
+          if(nextHeight && Math.abs(nextHeight - gridRowHeightRef.current) > 1){
+            gridRowHeightRef.current = nextHeight;
+            setGridRowHeight(nextHeight);
+          }
+        }
+      }, []);
+      const safeRowHeight = Math.max(1, gridRowHeight || 56);
+      const overscanCount = 8;
+      const totalHeight = safeRowHeight * dateList.length;
+      const startIndex = Math.max(0, Math.floor(gridScrollTop / safeRowHeight) - overscanCount);
+      const endIndex = Math.min(dateList.length, Math.ceil((gridScrollTop + gridViewportHeight) / safeRowHeight) + overscanCount);
+      const visibleDates = dateList.slice(startIndex, endIndex);
+      const beforeHeight = startIndex * safeRowHeight;
+      const afterHeight = Math.max(0, totalHeight - endIndex * safeRowHeight);
+      const columnSpan = Math.max(1, employees.length + 3);
       const activeCellRef = useRef(null);
       const setCellByIndex = useCallback((dIndex, eIndex, value)=>{
         const d = dateList[dIndex];
@@ -2130,10 +2261,25 @@
         const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateCount-1));
         const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, empCount-1));
         activeCellRef.current = { dIndex: ni, eIndex: nj };
+        const container = gridContainerRef.current;
+        if(container){
+          const rowHeight = gridRowHeightRef.current || safeRowHeight;
+          const targetTop = ni * rowHeight;
+          const targetBottom = targetTop + rowHeight;
+          const viewTop = container.scrollTop;
+          const viewBottom = viewTop + container.clientHeight;
+          if(targetTop < viewTop){
+            container.scrollTop = targetTop;
+          } else if(targetBottom > viewBottom){
+            container.scrollTop = targetBottom - container.clientHeight;
+          }
+        }
         const id = `cell-${ni}-${nj}`;
-        const el = document.getElementById(id);
-        if(el) el.focus();
-      }, [dateCount, empCount]);
+        requestAnimationFrame(()=>{
+          const el = document.getElementById(id);
+          if(el) el.focus();
+        });
+      }, [dateCount, empCount, safeRowHeight]);
       const openPickerAt = useCallback((di, ei, anchorEl)=>{
         if(editingLocked) return;
         const el = anchorEl || document.getElementById(`cell-${di}-${ei}`);
@@ -2200,7 +2346,8 @@
         onFocusCell,
         onKeyDownCell,
         openPickerAt,
-        setCellByIndex
+        setCellByIndex,
+        rowRef
       }){
         const dataRow = rowData || EMPTY_ROW;
         const stats = useMemo(()=>{
@@ -2220,7 +2367,7 @@
         const weekend = w===0 || w===6;
         const weekLabel = WN[w];
         return (
-          <tr className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
+          <tr ref={rowRef || null} data-row-index={di} className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
             <td className="py-1.5 px-3 font-medium text-gray-800 left-sticky" style={{minWidth:'8.5rem'}}>
               <div className="flex items-center gap-2"><span>{day}</span></div>
               <div className="text-xs text-gray-500 flex flex-wrap items-center gap-1">
@@ -2388,7 +2535,12 @@
             <div className="text-sm text-gray-500">请先在「员工管理」中添加员工。</div>
           ) : (
             <>
-              <div className="grid-wrap border rounded-xl shadow-inner" onPaste={(e)=>{ if(editingLocked) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}>
+              <div
+                ref={gridContainerRef}
+                className="grid-wrap border rounded-xl shadow-inner"
+                onScroll={handleGridScroll}
+                onPaste={(e)=>{ if(editingLocked) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}
+              >
                 <table className="min-w-max text-sm w-full">
                   <thead>
                     <tr className="bg-gray-50">
@@ -2424,23 +2576,38 @@
                     </tr>
                   </thead>
                   <tbody>
-                    {dateList.map((d,di)=> (
-                      <ScheduleRow
-                        key={d}
-                        day={d}
-                        di={di}
-                        employeesList={employees}
-                        rowData={data[d] || EMPTY_ROW}
-                        issue={nightIssues[d] || ''}
-                        staffingAlerts={staffingAlerts}
-                        editingLocked={editingLocked}
-                        shiftColors={shiftColors}
-                        onFocusCell={onFocusCell}
-                        onKeyDownCell={onKeyDownCell}
-                        openPickerAt={openPickerAt}
-                        setCellByIndex={setCellByIndex}
-                      />
-                    ))}
+                    {beforeHeight > 0 && (
+                      <tr key="virtual-top" aria-hidden="true">
+                        <td colSpan={columnSpan} style={{ height: beforeHeight, padding:0, border:0 }}></td>
+                      </tr>
+                    )}
+                    {visibleDates.map((d, idx)=>{
+                      const di = startIndex + idx;
+                      const rowRef = idx === 0 ? measureRow : null;
+                      return (
+                        <ScheduleRow
+                          key={d}
+                          day={d}
+                          di={di}
+                          employeesList={employees}
+                          rowData={data[d] || EMPTY_ROW}
+                          issue={nightIssues[d] || ''}
+                          staffingAlerts={staffingAlerts}
+                          editingLocked={editingLocked}
+                          shiftColors={shiftColors}
+                          onFocusCell={onFocusCell}
+                          onKeyDownCell={onKeyDownCell}
+                          openPickerAt={openPickerAt}
+                          setCellByIndex={setCellByIndex}
+                          rowRef={rowRef}
+                        />
+                      );
+                    })}
+                    {afterHeight > 0 && (
+                      <tr key="virtual-bottom" aria-hidden="true">
+                        <td colSpan={columnSpan} style={{ height: afterHeight, padding:0, border:0 }}></td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
                 <datalist id="shift-options">
@@ -3792,7 +3959,7 @@
           {versionsLoading && filteredVersions.length===0 ? (
             <div className="text-sm text-gray-500">正在加载历史版本…</div>
           ) : filteredVersions.length===0 ? (
-            versions.length>0 && !showAutoSaves && versions.some(v=> (v?.created_by_name || v?.created_by || '').trim()==='自动保存') ? (
+            versions.length>0 && !showAutoSaves && versions.some(v=> isAutoSaveLabel((v?.created_by_name || v?.created_by || '').trim())) ? (
               <p className="text-sm text-gray-500">当前筛选仅隐藏了自动保存记录，如需查看请勾选“显示自动保存”。</p>
             ) : (
               <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无历史版本，请在“设置 / 导出”页保存新版本或稍后刷新。</p>
@@ -3819,7 +3986,7 @@
                     const createdAt = v.created_at || v.createdAt || '—';
                     const operatorRaw = v.created_by_name || v.created_by || '管理员';
                     const operator = operatorRaw || '管理员';
-                    const isAuto = (operatorRaw || '').trim() === '自动保存';
+                    const isAuto = isAutoSaveLabel(operatorRaw);
                     const deleting = versionDeletingId === v.id;
                     return (
                       <tr key={v.id} className="border-t hover:bg-gray-50">
@@ -3992,6 +4159,8 @@
                 extraAccounts.map(acc=>{
                   const hasAll = acc.teamAccess && acc.teamAccess.includes('*');
                   const passwordDraft = accountPasswordDrafts[acc.username] || '';
+                  const displayDraft = accountDisplayDrafts[acc.username];
+                  const displayValue = displayDraft !== undefined ? displayDraft : (acc.displayName || '');
                   return (
                     <div key={acc.username} className="border rounded-2xl p-4 bg-white shadow-sm space-y-3">
                       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -4004,10 +4173,12 @@
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">显示名称</span>
-                          <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.displayName||''}
+                          <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={displayValue}
                             onCompositionStart={e=>{ e.target.isComposing = true; }}
                             onCompositionEnd={e=>{ e.target.isComposing = false; setAccountDisplayName(acc.username, e.target.value); }}
-                            onChange={allowIme(e=> setAccountDisplayName(acc.username, e.target.value))} disabled={editingLocked} />
+                            onChange={e=> setAccountDisplayDraft(acc.username, e.target.value)}
+                            onBlur={e=>{ if(!editingLocked) setAccountDisplayName(acc.username, e.target.value); }}
+                            disabled={editingLocked} />
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">角色</span>
@@ -4078,7 +4249,7 @@
         </Section>
       );
 
-      const userDisplayName = user ? (user.display_name || user.displayName || user.username || '访客') : '';
+      const userDisplayName = user ? (formatUserDisplayName(user) || '访客') : '';
       const Topbar = (
         <div className="sticky top-0 z-30 bg-gradient-to-b from-white/90 to-white/60 backdrop-blur border-b">
           <div className="layout-shell py-3 flex items-center gap-3">
