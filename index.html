@@ -970,6 +970,16 @@
       const [mixMax, setMixMax] = useState(1);
       const [yearlyOptimize, setYearlyOptimize] = useState(false);
 
+      const manualPlanAdjustRef = useRef(false);
+      const handlePlanStartChange = useCallback((value)=>{
+        manualPlanAdjustRef.current = true;
+        setPlanStart(value);
+      }, [setPlanStart]);
+      const handlePlanEndChange = useCallback((value)=>{
+        manualPlanAdjustRef.current = true;
+        setPlanEnd(value);
+      }, [setPlanEnd]);
+
       const skipSaveRef = useRef(false);
       const skipLoadRef = useRef(false);
       const initializedRef = useRef(false);
@@ -1795,10 +1805,12 @@
         } else {
           pendingAutoSaveRef.current = false;
         }
-        const msg = skipped > 0
-          ? `检测到其他账号已保存新版本，已同步最新数据，${skipped} 项本地改动因冲突未自动合并，请手动确认。`
-          : '检测到其他账号已保存新版本，已同步最新数据并保留本地改动。';
-        showToast(msg, skipped > 0 ? 'error' : 'info');
+        if(applied > 0 || skipped > 0){
+          const msg = skipped > 0
+            ? `检测到其他账号已保存新版本，已同步最新数据，${skipped} 项本地改动因冲突未自动合并，请手动确认。`
+            : '检测到其他账号已保存新版本，已同步最新数据并保留本地改动。';
+          showToast(msg, skipped > 0 ? 'error' : 'info');
+        }
         return { applied, skipped };
       }
 
@@ -2031,6 +2043,11 @@
         if(!user) return;
         if(!team) return;
         const key = autoLoadKey;
+        if(manualPlanAdjustRef.current && pendingAutoSaveRef.current){
+          manualPlanAdjustRef.current = false;
+          return;
+        }
+        manualPlanAdjustRef.current = false;
         if(autoLoadedTeamRef.current[key]) return;
         autoLoadedTeamRef.current[key] = true;
         loadFromServer();
@@ -2129,10 +2146,10 @@
           setBatchChecked({});
           setAlbumSelected({});
           if(start){
-            setPlanStart(start);
+            handlePlanStartChange(start);
           }
           if(end){
-            setPlanEnd(end);
+            handlePlanEndChange(end);
           }
           if(start || end){
             viewManuallyAdjustedRef.current = false;
@@ -2186,39 +2203,53 @@
       const gridContainerRef = useRef(null);
       const gridScrollRafRef = useRef(null);
       const gridRowHeightRef = useRef(56);
+      const gridColWidthRef = useRef(120);
       const [gridScrollTop, setGridScrollTop] = useState(0);
+      const [gridScrollLeft, setGridScrollLeft] = useState(0);
       const [gridViewportHeight, setGridViewportHeight] = useState(0);
+      const [gridViewportWidth, setGridViewportWidth] = useState(0);
       const [gridRowHeight, setGridRowHeight] = useState(56);
+      const [gridColWidth, setGridColWidth] = useState(120);
       useEffect(()=>{ gridRowHeightRef.current = gridRowHeight || 56; }, [gridRowHeight]);
+      useEffect(()=>{ gridColWidthRef.current = gridColWidth || 120; }, [gridColWidth]);
       const handleGridScroll = useCallback((event)=>{
-        const top = event.currentTarget ? event.currentTarget.scrollTop : 0;
+        const node = event.currentTarget;
+        const top = node ? node.scrollTop : 0;
+        const left = node ? node.scrollLeft : 0;
         if(gridScrollRafRef.current){
           cancelAnimationFrame(gridScrollRafRef.current);
         }
-        gridScrollRafRef.current = requestAnimationFrame(()=> setGridScrollTop(top));
+        gridScrollRafRef.current = requestAnimationFrame(()=>{
+          setGridScrollTop(top);
+          setGridScrollLeft(left);
+        });
       }, []);
       useEffect(()=>()=>{ if(gridScrollRafRef.current) cancelAnimationFrame(gridScrollRafRef.current); }, []);
       useLayoutEffect(()=>{
         const node = gridContainerRef.current;
         if(!node) return;
-        const updateHeight = ()=>{
-          const next = node.clientHeight || 0;
-          setGridViewportHeight(prev=> Math.abs(prev - next) > 1 ? next : prev);
+        const updateSize = ()=>{
+          const nextH = node.clientHeight || 0;
+          const nextW = node.clientWidth || 0;
+          setGridViewportHeight(prev=> Math.abs(prev - nextH) > 1 ? nextH : prev);
+          setGridViewportWidth(prev=> Math.abs(prev - nextW) > 1 ? nextW : prev);
         };
-        updateHeight();
+        updateSize();
         if(typeof ResizeObserver !== 'undefined'){
-          const ro = new ResizeObserver(()=> updateHeight());
+          const ro = new ResizeObserver(()=> updateSize());
           ro.observe(node);
           return ()=> ro.disconnect();
         }
-        const timer = setInterval(updateHeight, 500);
+        const timer = setInterval(updateSize, 500);
         return ()=> clearInterval(timer);
       }, [employees.length, dateList.length]);
       useEffect(()=>{
         setGridScrollTop(0);
+        setGridScrollLeft(0);
         const node = gridContainerRef.current;
         if(node){
           node.scrollTop = 0;
+          node.scrollLeft = 0;
         }
       }, [team, viewStart, viewEnd, planStart, planEnd, employees.length]);
       const measureRow = useCallback((node)=>{
@@ -2231,15 +2262,36 @@
           }
         }
       }, []);
+      const measureCell = useCallback((node)=>{
+        if(node){
+          const rect = node.getBoundingClientRect();
+          const nextWidth = rect && rect.width ? rect.width : 0;
+          if(nextWidth && Math.abs(nextWidth - gridColWidthRef.current) > 1){
+            gridColWidthRef.current = nextWidth;
+            setGridColWidth(nextWidth);
+          }
+        }
+      }, []);
       const safeRowHeight = Math.max(1, gridRowHeight || 56);
-      const overscanCount = 8;
+      const estimatedRowsInView = gridViewportHeight > 0 ? Math.ceil(gridViewportHeight / safeRowHeight) : 14;
+      const overscanRows = Math.max(10, Math.ceil(estimatedRowsInView / 2));
       const totalHeight = safeRowHeight * dateList.length;
-      const startIndex = Math.max(0, Math.floor(gridScrollTop / safeRowHeight) - overscanCount);
-      const endIndex = Math.min(dateList.length, Math.ceil((gridScrollTop + gridViewportHeight) / safeRowHeight) + overscanCount);
+      const startIndex = Math.max(0, Math.floor(gridScrollTop / safeRowHeight) - overscanRows);
+      const endIndex = Math.min(dateList.length, Math.ceil((gridScrollTop + gridViewportHeight) / safeRowHeight) + overscanRows);
       const visibleDates = dateList.slice(startIndex, endIndex);
       const beforeHeight = startIndex * safeRowHeight;
       const afterHeight = Math.max(0, totalHeight - endIndex * safeRowHeight);
-      const columnSpan = Math.max(1, employees.length + 3);
+      const safeColWidth = Math.max(40, gridColWidth || 120);
+      const totalColumnWidth = safeColWidth * Math.max(employees.length, 0);
+      const estimatedColsInView = gridViewportWidth > 0 ? Math.ceil(gridViewportWidth / safeColWidth) : 8;
+      const overscanCols = Math.max(10, Math.ceil(estimatedColsInView / 2));
+      const startEmpIndex = Math.max(0, Math.floor(gridScrollLeft / safeColWidth) - overscanCols);
+      const endEmpIndex = Math.min(employees.length, Math.ceil((gridScrollLeft + gridViewportWidth) / safeColWidth) + overscanCols);
+      const visibleEmployees = employees.slice(startEmpIndex, endEmpIndex);
+      const beforeColumnWidth = startEmpIndex * safeColWidth;
+      const afterColumnWidth = Math.max(0, totalColumnWidth - endEmpIndex * safeColWidth);
+      const dynamicColumnCount = visibleEmployees.length + (beforeColumnWidth > 0 ? 1 : 0) + (afterColumnWidth > 0 ? 1 : 0);
+      const columnSpan = Math.max(1, 3 + Math.max(dynamicColumnCount, 1));
       const activeCellRef = useRef(null);
       const setCellByIndex = useCallback((dIndex, eIndex, value)=>{
         const d = dateList[dIndex];
@@ -2338,6 +2390,10 @@
         day,
         di,
         employeesList,
+        visibleEmployees,
+        startEmpIndex,
+        beforeColumnWidth,
+        afterColumnWidth,
         rowData,
         issue,
         staffingAlerts,
@@ -2347,7 +2403,8 @@
         onKeyDownCell,
         openPickerAt,
         setCellByIndex,
-        rowRef
+        rowRef,
+        measureCell
       }){
         const dataRow = rowData || EMPTY_ROW;
         const stats = useMemo(()=>{
@@ -2387,11 +2444,18 @@
             <td className="py-1.5 px-3 left-sticky-3" style={{minWidth:'9rem'}}>
               {issue? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
             </td>
-            {employeesList.map((emp, ei)=>{
+            {beforeColumnWidth > 0 && (
+              <td className="py-0" style={{ padding:0, border:0 }}>
+                <div style={{ width: beforeColumnWidth }}></div>
+              </td>
+            )}
+            {visibleEmployees.map((emp, offset)=>{
+              const ei = startEmpIndex + offset;
               const value = dataRow[emp] || '';
               const bg = shiftColors[value] || undefined;
+              const cellRef = offset === 0 && measureCell ? measureCell : null;
               return (
-                <td key={emp} className="py-1.5 px-3">
+                <td key={emp} className="py-1.5 px-3" ref={cellRef}>
                   <div className="cell-wrap">
                     <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
                       style={{ backgroundColor: bg }} value={value}
@@ -2411,6 +2475,11 @@
                 </td>
               );
             })}
+            {afterColumnWidth > 0 && (
+              <td className="py-0" style={{ padding:0, border:0 }}>
+                <div style={{ width: afterColumnWidth }}></div>
+              </td>
+            )}
           </tr>
         );
       });
@@ -2547,7 +2616,12 @@
                       <th className="sticky py-2 px-3 text-left left-sticky" style={{minWidth:'8.5rem'}}>日期</th>
                       <th className="sticky py-2 px-3 text-left left-sticky-2" style={{minWidth:'6.5rem'}}>星期</th>
                       <th className="sticky py-2 px-3 text-left left-sticky-3" style={{minWidth:'9rem'}}>问题</th>
-                      {employees.map(e=> {
+                      {beforeColumnWidth > 0 && (
+                        <th className="py-0" style={{ padding:0, border:0 }}>
+                          <div style={{ width: beforeColumnWidth }}></div>
+                        </th>
+                      )}
+                      {visibleEmployees.map(e=> {
                         const diff = (gridEmpCounts[e]?.总||0) - Number(adminDays||0);
                         const diffCls = diff===0? 'bg-gray-100 text-gray-700' : (diff>0? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700');
                         const tooltip = empYearStats[e];
@@ -2573,6 +2647,11 @@
                           </th>
                         );
                       })}
+                      {afterColumnWidth > 0 && (
+                        <th className="py-0" style={{ padding:0, border:0 }}>
+                          <div style={{ width: afterColumnWidth }}></div>
+                        </th>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
@@ -2584,12 +2663,17 @@
                     {visibleDates.map((d, idx)=>{
                       const di = startIndex + idx;
                       const rowRef = idx === 0 ? measureRow : null;
+                      const cellMeasure = idx === 0 ? measureCell : null;
                       return (
                         <ScheduleRow
                           key={d}
                           day={d}
                           di={di}
                           employeesList={employees}
+                          visibleEmployees={visibleEmployees}
+                          startEmpIndex={startEmpIndex}
+                          beforeColumnWidth={beforeColumnWidth}
+                          afterColumnWidth={afterColumnWidth}
                           rowData={data[d] || EMPTY_ROW}
                           issue={nightIssues[d] || ''}
                           staffingAlerts={staffingAlerts}
@@ -2600,6 +2684,7 @@
                           openPickerAt={openPickerAt}
                           setCellByIndex={setCellByIndex}
                           rowRef={rowRef}
+                          measureCell={cellMeasure}
                         />
                       );
                     })}
@@ -2730,13 +2815,13 @@
               <div className="font-medium text-gray-700">自动排班日期范围</div>
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <label className="inline-flex items-center gap-2">开始
-                  <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planStart}
-                    onChange={e=> setPlanStart(e.target.value)} disabled={editingLocked} />
+                    <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planStart}
+                      onChange={e=> handlePlanStartChange(e.target.value)} disabled={editingLocked} />
                 </label>
                 <span className="text-gray-400">—</span>
                 <label className="inline-flex items-center gap-2">结束
-                  <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planEnd}
-                    onChange={e=> setPlanEnd(e.target.value)} disabled={editingLocked} />
+                    <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planEnd}
+                      onChange={e=> handlePlanEndChange(e.target.value)} disabled={editingLocked} />
                 </label>
                 <span className="text-xs text-gray-400">顶部日期仅用于筛选视图</span>
               </div>
