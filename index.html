@@ -6,10 +6,12 @@
   <title>排班助手（测试版）</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    :root { --brand: 88 80 236; }
+    :root { --brand: 88 80 236; scroll-behavior: smooth; }
+    body { min-height: 100vh; background: radial-gradient(circle at top, rgba(129,140,248,.18), transparent 55%) fixed, linear-gradient(180deg, rgba(248,250,252,1), rgba(241,245,249,1)); transition: background 0.6s ease; }
     @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(8px) scale(.98);} to { opacity: 1; transform: translateY(0) scale(1);} }
-    .animate-fade-in { animation: fadeSlideIn .35s ease both; }
-    .grid-wrap { height: calc(100vh - 260px); overflow: auto; }
+    @keyframes gentleFloat { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+    .animate-fade-in { animation: fadeSlideIn .35s ease both; will-change: transform, opacity; }
+    .grid-wrap { height: calc(100vh - 260px); overflow: auto; scroll-behavior: smooth; }
     th.sticky { position: sticky; top: 0; background: rgb(249 250 251/0.95); z-index: 3; backdrop-filter: blur(4px); }
     td, th { white-space: nowrap; }
     input.cell { width: 6rem; padding-right: 1.75rem; }
@@ -24,23 +26,35 @@
     .left-sticky { position: sticky; left: 0; z-index: 2; background: white; }
     .left-sticky-2 { position: sticky; left: 8.5rem; z-index: 2; background: white; }
     .left-sticky-3 { position: sticky; left: 14.8rem; z-index: 2; background: white; }
-    .badge { display:inline-flex; align-items:center; justify-content:center; min-width:2.25rem; height:1.75rem; border-radius:9999px; padding:0 .5rem; font-size:.75rem; }
-    .floating-progress { position: fixed; right: 16px; bottom: 16px; z-index: 50; width: 340px; }
-    .fp-card { background: linear-gradient(135deg, rgba(88,80,236,.12), rgba(14,165,233,.12)); border: 1px solid rgba(88,80,236,.18); box-shadow: 0 10px 30px rgba(0,0,0,.08); }
-    .logbox { max-height: 140px; overflow:auto; background: rgba(255,255,255,.7); border-radius: .75rem; border: 1px solid rgba(88,80,236,.18); }
-    .picker { box-shadow: 0 10px 30px rgba(0,0,0,.12); }
+    .badge { display:inline-flex; align-items:center; justify-content:center; min-width:2.25rem; height:1.75rem; border-radius:9999px; padding:0 .5rem; font-size:.75rem; backdrop-filter: blur(4px); }
+    .floating-progress { position: fixed; right: 16px; bottom: 16px; z-index: 50; width: 340px; animation: gentleFloat 7.2s ease-in-out infinite; will-change: transform; }
+    .fp-card { background: linear-gradient(135deg, rgba(88,80,236,.12), rgba(14,165,233,.12)); border: 1px solid rgba(88,80,236,.18); box-shadow: 0 10px 30px rgba(0,0,0,.08); transition: transform .35s ease, box-shadow .35s ease; backdrop-filter: blur(8px); }
+    .fp-card:hover { transform: translateY(-4px); box-shadow: 0 14px 32px rgba(88,80,236,.25); }
+    .logbox { max-height: 140px; overflow:auto; background: rgba(255,255,255,.78); border-radius: .75rem; border: 1px solid rgba(88,80,236,.18); transition: box-shadow .3s ease; }
+    .logbox:hover { box-shadow: inset 0 0 0 1px rgba(88,80,236,.25); }
+    .picker { box-shadow: 0 14px 32px rgba(15,23,42,.18); border: 1px solid rgba(148,163,184,.18); backdrop-filter: blur(10px); }
+    .section-card { background: rgba(255,255,255,.92); border-radius: 1.5rem; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 18px 35px rgba(15,23,42,.08); border: 1px solid rgba(148,163,184,.18); backdrop-filter: blur(12px); transition: transform .35s cubic-bezier(.4,0,.2,1), box-shadow .35s cubic-bezier(.4,0,.2,1); }
+    .section-card:hover { transform: translateY(-4px); box-shadow: 0 24px 45px rgba(79,70,229,.18); }
+    .dock-panel { will-change: transform; }
+    .layout-shell { width: min(96vw, 1800px); margin-left: auto; margin-right: auto; padding-left: 1.25rem; padding-right: 1.25rem; }
+    @media (max-width: 1024px){ .layout-shell { width: 100vw; padding-left: 1rem; padding-right: 1rem; } }
+    @media (prefers-reduced-motion: reduce){
+      .animate-fade-in, .floating-progress { animation: none !important; }
+      .section-card, .fp-card { transition: none !important; }
+    }
   </style>
 </head>
-<body class="bg-gray-50">
+<body>
   <div id="errbar" class="bg-red-50 text-red-700 text-sm px-4 py-2"></div>
   <div id="root"></div>
 
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin="anonymous"></script>
+  <script src="static/js/scheduler-algorithms.js"></script>
 
   <script type="text/babel" data-presets="env,react">
-    const { useState, useMemo, useEffect, useRef } = React;
+    const { useState, useMemo, useEffect, useRef, useCallback } = React;
 
     function globalErr(msg){ const bar = document.getElementById('errbar'); if(bar){ bar.textContent = '错误：' + msg; bar.className = 'show bg-red-50 text-red-700 text-sm px-4 py-2'; } }
     window.addEventListener('error', (e)=> globalErr(e?.message || '脚本错误'));
@@ -62,17 +76,26 @@
       </button>
     );
     const Section = ({title, children, right}) => (
-      <div className="bg-white rounded-2xl shadow p-4 mb-4 animate-fade-in">
+      <div className="section-card animate-fade-in">
         <div className="flex items-center justify-between mb-3"><h2 className="text-lg font-semibold">{title}</h2>{right}</div>
         {children}
       </div>
     );
 
     const API_BASE = '/api';
+    const EMPTY_ROW = Object.freeze({});
     const WN = ['日','一','二','三','四','五','六'];
     const today = new Date();
     const SHIFT_TYPES = ['白','中1','中2','夜','休'];
     const SHIFT_WORK_TYPES = ['白','中1','中2','夜'];
+
+    const allowIme = (handler)=>{
+      return (event, ...args)=>{
+        if(!event) return handler(event, ...args);
+        if(event.isComposing || event?.nativeEvent?.isComposing || event?.target?.isComposing) return;
+        return handler(event, ...args);
+      };
+    };
 
     function fmt(d) { return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10); }
     function monthRangeOf(dateObj){ const y = dateObj.getFullYear(); const m = dateObj.getMonth(); const start = new Date(y, m, 1); const end = new Date(y, m + 1, 0); return [fmt(start), fmt(end)]; }
@@ -109,6 +132,18 @@
       return fmt(d);
     }
 
+    function albumEntryKey(entry, fallbackIndex = 0){
+      if(entry && entry.id) return String(entry.id);
+      if(entry && entry.savedAt){
+        const stamp = Date.parse(entry.savedAt);
+        if(Number.isFinite(stamp)) return `${entry.savedAt}`;
+      }
+      if(entry && entry.range && entry.range.start && entry.range.end){
+        return `${entry.range.start}_${entry.range.end}_${fallbackIndex}`;
+      }
+      return `album_${fallbackIndex}`;
+    }
+
     async function apiGet(path){ const r = await fetch(API_BASE + path, { credentials: 'include' }); if(!r.ok){ let msg='请求失败'; try { const e=await r.json(); msg=e.message||msg; } catch{} throw new Error(msg); } return r.json(); }
     async function apiPost(path, body){ const r = await fetch(API_BASE + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body||{}), credentials: 'include' }); if(!r.ok){ let ejson=null; try { ejson = await r.json(); } catch{} const err = new Error((ejson&&ejson.message)||'请求失败'); if(ejson) err.payload = ejson; throw err; } return r.json(); }
 
@@ -117,10 +152,37 @@
     function setVal(map, day, emp, val){ const row = { ...(map[day]||{}) }; row[emp] = val; map[day] = row; }
 
     function countByEmpInRange(employees, data, start, end){
-      const dates = enumerateDates(start,end);
-      const counter = {}; for(const e of employees){ counter[e] = { 总:0 }; for(const s of SHIFT_WORK_TYPES){ counter[e][s]=0; } }
-      for(const d of dates){ const row = data[d]||{}; for(const e of employees){ const v = row[e]||''; if(!v || v==='休') continue; counter[e]['总']++; if(SHIFT_WORK_TYPES.includes(v)) counter[e][v]++; } }
+      const normalize = (val)=>{
+        if(typeof val !== 'string') return null;
+        const trimmed = val.slice(0,10);
+        return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+      };
+      let s = normalize(start);
+      let e = normalize(end);
+      if(s && e && s > e){ const tmp = s; s = e; e = tmp; }
+      const dates = (s && e) ? enumerateDates(s, e) : Object.keys(data||{}).sort();
+      const counter = {}; for(const emp of employees){ counter[emp] = { 总:0 }; for(const shift of SHIFT_WORK_TYPES){ counter[emp][shift]=0; } }
+      for(const day of dates){ if(s && day < s) continue; if(e && day > e) continue; const row = data?.[day] || {}; for(const emp of employees){ const v = row[emp]||''; if(!v || v==='休') continue; counter[emp]['总']++; if(SHIFT_WORK_TYPES.includes(v)) counter[emp][v]++; } }
       return counter;
+    }
+    function countByEmpOnDates(employees, data, dates){
+      const counter = {};
+      let hasWork = false;
+      for(const emp of employees){
+        counter[emp] = { 总:0 };
+        for(const shift of SHIFT_WORK_TYPES){ counter[emp][shift] = 0; }
+      }
+      for(const day of dates){
+        const row = data?.[day] || {};
+        for(const emp of employees){
+          const v = row[emp] || '';
+          if(!v || v === '休') continue;
+          counter[emp]['总']++;
+          if(SHIFT_WORK_TYPES.includes(v)) counter[emp][v]++;
+          hasWork = true;
+        }
+      }
+      return { counter, hasWork };
     }
 
     function countRunLeft(data, d, e){ let c=0; for(let i=-1;i>=-10;i--){ const ymd=dateAdd(d,i); const v=getVal(data, ymd, e); if(isWork(v)) c++; else break; } return c; }
@@ -222,6 +284,32 @@
       if(!hash) return raw === '';
       return hash === hashPassword(raw);
     }
+    function encodeCredential(raw){
+      if(typeof raw !== 'string') return '';
+      try {
+        return btoa(unescape(encodeURIComponent(raw)));
+      } catch {
+        return raw;
+      }
+    }
+    function decodeCredential(raw){
+      if(typeof raw !== 'string') return '';
+      try {
+        return decodeURIComponent(escape(atob(raw)));
+      } catch {
+        try {
+          return atob(raw);
+        } catch {
+          return typeof raw === 'string' ? raw : '';
+        }
+      }
+    }
+    const ADMIN_USERNAME = 'admin';
+    const ADMIN_DISPLAY_NAME = '超级管理员';
+    const ADMIN_DEFAULT_PASSWORD = '19971109';
+    const ADMIN_PASSWORD_HASH = hashPassword(ADMIN_DEFAULT_PASSWORD);
+    const LOGIN_STORAGE_KEY = 'scheduler_login_cache_v1';
+    const LOGIN_STORAGE_TTL = 30 * 24 * 60 * 60 * 1000;
     function defaultMenuPerms(overrides){
       const base = {};
       MENU_KEYS.forEach(key=>{ base[key] = { visible:true, editable:true }; });
@@ -279,10 +367,10 @@
         ],
         accounts: [
           {
-            username:'admin',
-            displayName:'超级管理员',
+            username: ADMIN_USERNAME,
+            displayName: ADMIN_DISPLAY_NAME,
             role:'super',
-            passwordHash:'',
+            passwordHash: ADMIN_PASSWORD_HASH,
             menus: defaultMenuPerms({ roles:{ visible:true } }),
             teamAccess:['*']
           }
@@ -306,7 +394,18 @@
           const username = acc.username.trim();
           if(!username || username === 'admin') return;
           const menus = normalizeMenuPerms(acc.menus);
-          const access = Array.isArray(acc.teamAccess) && acc.teamAccess.length ? Array.from(new Set(acc.teamAccess.filter(id=> id==='*' || teamIds.has(id)))) : ['*'];
+          let access = ['*'];
+          if(Array.isArray(acc.teamAccess)){
+            const cleaned = acc.teamAccess.filter(id=> id==='*' || teamIds.has(id));
+            const unique = Array.from(new Set(cleaned));
+            if(unique.includes('*')){
+              access = ['*'];
+            } else if(unique.length>0){
+              access = unique;
+            } else if(acc.teamAccess.length === 0){
+              access = [];
+            }
+          }
           accounts.push({
             username,
             displayName: typeof acc.displayName === 'string' ? acc.displayName : '',
@@ -319,10 +418,10 @@
       }
       const adminMenus = defaultMenuPerms({ roles:{ visible:true } });
       const adminAccount = {
-        username:'admin',
-        displayName:'超级管理员',
+        username: ADMIN_USERNAME,
+        displayName: ADMIN_DISPLAY_NAME,
         role:'super',
-        passwordHash:'',
+        passwordHash: ADMIN_PASSWORD_HASH,
         menus: adminMenus,
         teamAccess:['*']
       };
@@ -333,6 +432,8 @@
       return {
         start: rangeStart,
         end: rangeEnd,
+        viewStart: rangeStart,
+        viewEnd: rangeEnd,
         employees: [],
         data: {},
         versionId: null,
@@ -379,459 +480,61 @@
     const dayToW = (day)=> ((new Date(day).getDay()+6)%7)+1; // 周一=1 ... 周日=7
     function isRestDayForEmp(restPrefs, emp, day){ const p = restPrefs?.[emp]; if(!p) return false; const set = pairToSet(p); const w = dayToW(day); return set.has(w); }
 
-    function buildWhiteFiveTwo({employees, data, start, end, restPrefs}){
-      const dates = enumerateDates(start,end);
-      const next = {...data};
-      for(const d of dates){ const r={...(next[d]||{})}; for(const e of employees){ const cur = r[e]||''; if(cur==='夜' || cur==='中2') continue; r[e] = isRestDayForEmp(restPrefs,e,d) ? '休' : '白'; }
-        next[d]=r; }
-      return next;
-    }
+    const schedulerAlgorithms = window.SchedulerAlgorithms.create({
+      enumerateDates,
+      dateAdd,
+      getVal,
+      setVal,
+      isWork,
+      wouldExceed6,
+      normalizeNightRules,
+      isRestDayForEmp
+    });
+    const {
+      buildWhiteFiveTwo,
+      applyAlternateByCycle,
+      clampDailyByRange,
+      clampPersonByRange,
+      adjustWithHistory,
+      autoAssignNightAndM2,
+      sortedByHistory,
+      statsForEmployee,
+      longestRun,
+      mixedCyclesCount,
+      cyclesForEmp,
+      repairNoMidToWhite,
+      planAlbumSchedule
+    } = schedulerAlgorithms;
 
-    function buildWorkBlocks(data, emp, start, end){
-      const days = enumerateDates(start, end);
-      const blocks = [];
-      let cur=[];
-      for(const d of days){ const v=getVal(data,d,emp); const work = (v!=='休' && v!=='夜' && v!=='中2'); if(work){ cur.push(d); } else { if(cur.length) { blocks.push(cur); cur=[]; } } }
-      if(cur.length) blocks.push(cur);
-      return blocks;
-    }
-    function cyclesForEmp(data, emp, start, end){
-      const blocks = buildWorkBlocks(data, emp, start, end);
-      const cycles=[]; for(const b of blocks){ const k = Math.floor(b.length/5); for(let i=0;i<k;i++){ cycles.push(b.slice(i*5, i*5+5)); } }
-      return cycles; // 每项是 5 个日期
-    }
-
-    function isRightEdgeWhite(data, day, emp){ const v=getVal(data,day,emp); if(v!=='白') return false; const t1=dateAdd(day,1); const nxt=getVal(data,t1,emp); return nxt!=='白'; }
-    function isLeftEdgeMid(data, day, emp){ const v=getVal(data,day,emp); if(v!=='中1') return false; const t0=dateAdd(day,-1); const pre=getVal(data,t0,emp); return pre!=='中1'; }
-
-    function dailyMidCount(data, day, employees){ const row=data[day]||{}; let c=0; for(const e of employees){ if(row[e]==='中1') c++; } return c; }
-    function dailyWhiteCount(data, day, employees){ const row=data[day]||{}; let c=0; for(const e of employees){ if(row[e]==='白') c++; } return c; }
-    function empMidCountInRange(data, emp, start, end){ let c=0; for(const d of enumerateDates(start,end)){ if(getVal(data,d,emp)==='中1') c++; } return c; }
-    function empWhiteCountInRange(data, emp, start, end){ let c=0; for(const d of enumerateDates(start,end)){ if(getVal(data,d,emp)==='白') c++; } return c; }
-
-    // 统计混合周期数量
-    function mixedCyclesCount(data, emp, start, end){
-      const cycles = cyclesForEmp(data, emp, start, end);
-      let c = 0;
-      for(const cyc of cycles){ let hasW=false, hasM=false; for(const d of cyc){ const v=getVal(data,d,emp); if(v==='白') hasW=true; if(v==='中1') hasM=true; } if(hasW && hasM) c++; }
-      return c;
-    }
-
-    // 个人最大连续上班天数
-    function longestRun(data, emp, start, end){
-      let max=0, cur=0; for(const d of enumerateDates(start,end)){ if(isWork(getVal(data,d,emp))){ cur++; max=Math.max(max,cur); } else { cur=0; } } return max; }
-
-    // 安全写入：检查 6 连班、相邻“中1→白”禁忌、混合周期上限
-    function trySetVal(next, day, emp, newV, {start, end, mixMaxRatio}){
-      const prev = getVal(next, day, emp);
-      if(prev === newV) return true;
-      if(wouldExceed6(next, emp, day, newV)) return false;
-      const prevDay = dateAdd(day, -1), nextDay = dateAdd(day, 1);
-      if(newV==='白' && getVal(next, prevDay, emp)==='中1') return false;
-      if(newV==='中1' && getVal(next, nextDay, emp)==='白') return false;
-      const tmp = JSON.parse(JSON.stringify(next));
-      setVal(tmp, day, emp, newV);
-      if(typeof mixMaxRatio==='number'){
-        const tot = cyclesForEmp(tmp, emp, start, end).length;
-        const allow = Math.ceil(tot * mixMaxRatio - 1e-9);
-        const mixed = mixedCyclesCount(tmp, emp, start, end);
-        if(mixed > allow) return false;
+    const waitForFrame = () => new Promise(resolve => {
+      if(typeof window !== 'undefined' && window.requestAnimationFrame){
+        window.requestAnimationFrame(()=> resolve());
+      } else {
+        setTimeout(resolve, 16);
       }
-      setVal(next, day, emp, newV);
-      return true;
-    }
-
-    function repairNoMidToWhite({data, employees, start, end}){
-      const next = {...data};
-      for(const e of employees){ const ds = enumerateDates(start,end); for(let i=0;i<ds.length-1;i++){ const a=ds[i], b=ds[i+1]; const va=getVal(next,a,e), vb=getVal(next,b,e); if(va==='中1' && vb==='白'){
-            if(!wouldExceed6(next, e, b, '中1')){ setVal(next, b, e, '中1'); } else { setVal(next, a, e, '白'); }
-          } }
-      }
-      return next;
-    }
-
-    function applyAlternateByCycle({employees, data, start, end}, mixMaxRatio=1){
-      const next = {...data};
-      employees.forEach((e,idx)=>{
-        const startIsWhite = (idx % 2 === 0);
-        const cycles = cyclesForEmp(next, e, start, end);
-        cycles.forEach((cyc,ci)=>{
-          const shouldMid = startIsWhite ? (ci % 2 === 1) : (ci % 2 === 0);
-          if(shouldMid){ for(const d of cyc){ if(isRightEdgeWhite(next, d, e)) trySetVal(next, d, e, '中1', {start,end,mixMaxRatio}); }
-          }
-        });
-      });
-      return repairNoMidToWhite({ data: next, employees, start, end });
-    }
-
-    function clampDailyByRange({employees, data, start, end, rMin=0.3, rMax=0.7, maxRounds=300, mixMaxRatio=1}){
-      let cur = JSON.parse(JSON.stringify(data));
-      const days = enumerateDates(start,end);
-      for(let round=0; round<maxRounds; round++){
-        let changed=false;
-        for(const d of days){
-          const W = dailyWhiteCount(cur,d,employees);
-          const M = dailyMidCount(cur,d,employees);
-          const A = W + M; if(A===0) continue;
-          const low = Math.ceil(rMin * W);
-          const high = Math.floor(rMax * W);
-          if(M > high){
-            let cands = employees.filter(e=> isLeftEdgeMid(cur, d, e));
-            cands = cands.sort((a,b)=> (empWhiteCountInRange(cur,b,start,end)>0?empMidCountInRange(cur,b,start,end)/empWhiteCountInRange(cur,b,start,end):99) - (empWhiteCountInRange(cur,a,start,end)>0?empMidCountInRange(cur,a,start,end)/empWhiteCountInRange(cur,a,start,end):99));
-            for(const e of cands){ if(trySetVal(cur, d, e, '白', {start,end,mixMaxRatio})) { changed=true; if(dailyMidCount(cur,d,employees) <= high) break; } }
-          } else if (M < low){
-            let cands = employees.filter(e=> isRightEdgeWhite(cur, d, e));
-            cands = cands.sort((a,b)=> (empWhiteCountInRange(cur,a,start,end)>0?empMidCountInRange(cur,a,start,end)/empWhiteCountInRange(cur,a,start,end):0) - (empWhiteCountInRange(cur,b,start,end)>0?empMidCountInRange(cur,b,start,end)/empWhiteCountInRange(cur,b,start,end):0));
-            for(const e of cands){ if(trySetVal(cur, d, e, '中1', {start,end,mixMaxRatio})) { changed=true; if(dailyMidCount(cur,d,employees) >= low) break; } }
-          }
-        }
-        if(!changed) break;
-      }
-      return repairNoMidToWhite({ data: cur, employees, start, end });
-    }
-
-    function clampPersonByRange({employees, data, start, end, pMin=0.3, pMax=0.7, maxRounds=240, mixMaxRatio=1}){
-      let cur = JSON.parse(JSON.stringify(data));
-      const days = enumerateDates(start, end);
-      for(let round=0; round<maxRounds; round++){
-        let changed=false;
-        for(const e of employees){
-          const W = empWhiteCountInRange(cur,e,start,end);
-          const M = empMidCountInRange(cur,e,start,end);
-          if(W===0 && M===0) continue;
-          const low = Math.ceil(pMin * Math.max(1,W));
-          const high = Math.floor(pMax * Math.max(1,W));
-          if(M > high){
-            for(const d of days){
-              if(isLeftEdgeMid(cur, d, e)){
-                if(trySetVal(cur, d, e, '白', {start,end,mixMaxRatio})) { changed=true; break; }
-              }
-            }
-          } else if (M < low){
-            for(const d of days){
-              if(isRightEdgeWhite(cur, d, e)){
-                if(trySetVal(cur, d, e, '中1', {start,end,mixMaxRatio})) { changed=true; break; }
-              }
-            }
-          }
-        }
-        if(!changed) break;
-      }
-      return repairNoMidToWhite({ data: cur, employees, start, end });
-    }
-
-    function statsForEmployee(data, emp, start, end){
-      let white=0, mid=0, mid2=0, night=0, total=0;
-      for(const day of enumerateDates(start, end)){
-        const v = getVal(data, day, emp);
-        if(!v || v==='休') continue;
-        total++;
-        if(v==='白') white++;
-        else if(v==='中1') mid++;
-        else if(v==='中2') mid2++;
-        else if(v==='夜') night++;
-      }
-      return { white, mid, mid2, night, total };
-    }
-
-    function sortedByHistory(employees, historyProfile){
-      const totals = historyProfile?.shiftTotals || historyProfile?.shift_totals || {};
-      return employees.slice().sort((a,b)=>{
-        const ta = totals[a]?.total ?? totals[a]?.总 ?? 0;
-        const tb = totals[b]?.total ?? totals[b]?.总 ?? 0;
-        if(ta !== tb) return ta - tb;
-        const wa = totals[a]?.white ?? totals[a]?.白 ?? 0;
-        const wb = totals[b]?.white ?? totals[b]?.白 ?? 0;
-        if(wa !== wb) return wa - wb;
-        return a.localeCompare(b,'zh-CN');
-      });
-    }
-
-    function adjustEmployeeSchedule({ next, emp, days, spanStart, spanEnd, targetWhite, targetMid, targetTotal, mixMaxRatio }){
-      const count = ()=>{
-        let white=0, mid=0, total=0;
-        for(const day of days){
-          const v = getVal(next, day, emp);
-          if(!v || v==='休') continue;
-          total++;
-          if(v==='白') white++;
-          else if(v==='中1') mid++;
-        }
-        return { white, mid, total };
-      };
-      const tryConvert = (from, to)=>{
-        for(const day of days){
-          const v = getVal(next, day, emp);
-          if(v !== from) continue;
-          if(to === '休'){
-            const row = { ...(next[day]||{}) };
-            row[emp] = '休';
-            next[day] = row;
-            return true;
-          }
-          if(to === '白' || to === '中1'){
-            if(trySetVal(next, day, emp, to, { start: spanStart, end: spanEnd, mixMaxRatio })){
-              return true;
-            }
-          }
-        }
-        return false;
-      };
-      let guard = days.length * 8;
-      let cur = count();
-      while(cur.mid > targetMid && guard-- > 0){
-        if(cur.white < targetWhite){
-          if(!tryConvert('中1','白')) break;
-        } else if(!tryConvert('中1','休')){
-          break;
-        }
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.mid < targetMid && guard-- > 0){
-        if(!tryConvert('白','中1')){
-          if(!tryConvert('休','中1')) break;
-        }
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.white > targetWhite && guard-- > 0){
-        if(!tryConvert('白','休')) break;
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.white < targetWhite && guard-- > 0){
-        if(!tryConvert('休','白')){
-          if(!tryConvert('中1','白')) break;
-        }
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.total > targetTotal && guard-- > 0){
-        if(!tryConvert('白','休')){
-          if(!tryConvert('中1','休')) break;
-        }
-        cur = count();
-      }
-      guard = days.length * 8;
-      while(cur.total < targetTotal && guard-- > 0){
-        if(cur.white < targetWhite){
-          if(!tryConvert('休','白')){
-            if(!tryConvert('中1','白')) break;
-          }
-        } else {
-          if(!tryConvert('休','中1') && !tryConvert('白','中1')) break;
-        }
-        cur = count();
-      }
-    }
-
-    function adjustWithHistory({ data, employees, start, end, adminDays, historyProfile, mixMaxRatio=1, yearlyOptimize=false }){
-      if(!employees.length) return data;
-      const days = enumerateDates(start, end);
-      if(!days.length) return data;
-      const next = JSON.parse(JSON.stringify(data));
-      const totals = historyProfile?.shiftTotals || historyProfile?.shift_totals || {};
-      const lastAssignments = historyProfile?.lastAssignments || historyProfile?.last_assignments || {};
-      const spanStart = days[0];
-      const spanEnd = days[days.length-1];
-
-      if(lastAssignments && spanStart){
-        employees.forEach(emp=>{
-          const prev = lastAssignments[emp];
-          if(!prev) return;
-          if((prev==='夜' || prev==='中2') && isWork(getVal(next, spanStart, emp))){
-            setVal(next, spanStart, emp, '休');
-          }
-          if(prev==='中1' && getVal(next, spanStart, emp)==='白'){
-            setVal(next, spanStart, emp, '休');
-          }
-        });
-        if(yearlyOptimize){
-          employees.forEach(emp=>{
-            const prev = lastAssignments[emp];
-            if(prev === '休' && isWork(getVal(next, spanStart, emp))){
-              setVal(next, spanStart, emp, '休');
-            }
-          });
-        }
-      }
-
-      employees.forEach(emp=>{
-        const stats = statsForEmployee(next, emp, start, end);
-        const totalDays = days.length;
-        const targetTotal = (Number.isFinite(adminDays) && adminDays>0) ? Math.min(adminDays, totalDays) : stats.total;
-        const hist = totals[emp] || {};
-        const histTotal = hist.total ?? hist.总 ?? ((hist.white||hist.白||0)+(hist.mid||hist.中1||0)+(hist.mid2||hist.中2||0)+(hist.night||hist.夜||0));
-        let whiteShare = histTotal>0 ? (hist.white ?? hist.白 ?? 0)/histTotal : (stats.total? stats.white/Math.max(1,stats.total) : 0.6);
-        let midShare = histTotal>0 ? (hist.mid ?? hist.中1 ?? 0)/histTotal : (stats.total? stats.mid/Math.max(1,stats.total) : 0.4);
-        if(!Number.isFinite(whiteShare) || whiteShare<0) whiteShare = 0;
-        if(!Number.isFinite(midShare) || midShare<0) midShare = 0;
-        if(whiteShare + midShare > 1){
-          const sum = whiteShare + midShare;
-          whiteShare /= sum;
-          midShare /= sum;
-        }
-        let targetWhite = Math.round(targetTotal * whiteShare);
-        let targetMid = Math.round(targetTotal * midShare);
-        if(targetWhite + targetMid > targetTotal){
-          const overflow = targetWhite + targetMid - targetTotal;
-          if(targetMid >= overflow){
-            targetMid -= overflow;
-          } else {
-            targetWhite = Math.max(0, targetWhite - (overflow - targetMid));
-            targetMid = 0;
-          }
-        }
-        adjustEmployeeSchedule({ next, emp, days, spanStart, spanEnd, targetWhite, targetMid, targetTotal, mixMaxRatio });
-      });
-
-      return next;
-    }
-
-    function autoAssignNightAndM2({employees, data, start, end, override=false, nightRules, restPrefs={}}){
-      const rules = normalizeNightRules(nightRules);
-      const dates = enumerateDates(start,end);
-      const newData = { ...data };
-      const status = {};
-      for(const e of employees){ status[e] = { lastNight:null, lastMid2:null }; }
-      function gapFrom(lastDay, curDay){ if(!lastDay) return Number.POSITIVE_INFINITY; return (new Date(curDay) - new Date(lastDay)) / 86400000; }
-      function shouldRestFromHistory(emp, idx, kind){
-        if(idx===undefined || idx===null) return false;
-        const nightRestEnforced = rules.restAfterNight || rules.allowNightDay4;
-        if(!nightRestEnforced && !rules.restAfterMid2) return false;
-        for(let back=1; back<=2; back++){
-          const prevIdx = idx-back;
-          if(prevIdx < 0) continue;
-          const prevDay = dates[prevIdx];
-          const prevVal = getVal(newData, prevDay, emp);
-          if(nightRestEnforced && prevVal==='夜') return true;
-          if(rules.restAfterMid2 && prevVal==='中2'){
-            if(kind==='中2' && rules.allowDoubleMid2 && back===1) continue;
-            return true;
-          }
-        }
-        if(kind==='中2' && rules.allowDoubleMid2 && rules.restAfterMid2){
-          const prevDay = dates[idx-1];
-          const prevPrevDay = dates[idx-2];
-          if(prevDay && getVal(newData, prevDay, emp)==='中2' && prevPrevDay && getVal(newData, prevPrevDay, emp)==='中2') return true;
-        }
-        return false;
-      }
-      function ensureRest(emp, originIdx, daysCount, force=false){ for(let offset=1; offset<=daysCount; offset++){ const targetIdx = originIdx + offset; if(targetIdx >= dates.length) break; const day = dates[targetIdx]; const row = { ...(newData[day]||{}) }; const cur = row[emp] || ''; if(force || override || cur==='' || cur==='休'){ row[emp] = '休'; newData[day] = row; } } }
-      function capRest(emp, originIdx){ if(!rules.enforceRestCap) return; const targetIdx = originIdx + 3; if(targetIdx >= dates.length) return; const day = dates[targetIdx]; const row = { ...(newData[day]||{}) }; if(row[emp] === '休'){ const prevIdx = targetIdx - 1; const prevDay = prevIdx >=0 ? dates[prevIdx] : null; const prevVal = prevDay ? getVal(newData, prevDay, emp) : ''; row[emp] = prevVal === '白' ? '中1' : '白'; newData[day] = row; } }
-      function enforceNightDay4(emp, originIdx){ if(!rules.allowNightDay4) return; if(originIdx % 7 !== 3) return; ensureRest(emp, originIdx, 2, true); const day7Idx = originIdx + 3; if(day7Idx < dates.length){ const day7 = dates[day7Idx]; const row = { ...(newData[day7]||{}) }; if(row[emp] === '休' || !row[emp]){ row[emp] = '白'; newData[day7] = row; } }
-      }
-      for(let i=0; i<dates.length; i++){
-        const day = dates[i];
-        const baseRow = { ...(newData[day]||{}) };
-        if(!Object.values(baseRow).includes('夜')){
-          let candidates = employees.slice();
-          if(rules.prioritizeInterval){
-            candidates.sort((a,b)=> gapFrom(status[b].lastNight, day) - gapFrom(status[a].lastNight, day));
-          } else {
-            candidates.reverse();
-          }
-          const pickNight = candidates.find(emp=>{
-            const cur = baseRow[emp] || '';
-            if(cur==='休' || cur==='中2') return false;
-            if(!override && cur && cur!=='夜') return false;
-            if(shouldRestFromHistory(emp, i, '夜')) return false;
-            if(restPrefs && isRestDayForEmp(restPrefs, emp, day)) return false;
-            return true;
-          });
-          if(pickNight){
-            baseRow[pickNight] = '夜';
-            newData[day] = baseRow;
-            status[pickNight].lastNight = day;
-          }
-        } else {
-          newData[day] = baseRow;
-        }
-        const rowAfterNight = { ...(newData[day]||{}) };
-        if(!Object.values(rowAfterNight).includes('中2')){
-          let midCandidates = employees.slice().reverse();
-          const pickMid = midCandidates.find(emp=>{
-            const cur = rowAfterNight[emp] || '';
-            if(cur==='休' || cur==='夜') return false;
-            if(!override && cur && cur!=='中2') return false;
-            if(shouldRestFromHistory(emp, i, '中2')) return false;
-            if(!rules.allowDoubleMid2){
-              const prevDay = dates[i-1];
-              if(prevDay && getVal(newData, prevDay, emp)==='中2') return false;
-            }
-            if(restPrefs && isRestDayForEmp(restPrefs, emp, day)) return false;
-            return true;
-          });
-          if(pickMid){
-            rowAfterNight[pickMid] = '中2';
-            newData[day] = rowAfterNight;
-            status[pickMid].lastMid2 = day;
-          } else {
-            newData[day] = rowAfterNight;
-          }
-        } else {
-          newData[day] = rowAfterNight;
-        }
-        for(const emp of employees){
-          const val = getVal(newData, day, emp);
-          const st = status[emp];
-          if(val==='夜') st.lastNight = day;
-          if(val==='中2') st.lastMid2 = day;
-        }
-      }
-      if(rules.restAfterNight || rules.restAfterMid2){
-        for(const emp of employees){
-          for(let i=0; i<dates.length; i++){
-            const day = dates[i];
-            const val = getVal(newData, day, emp);
-            if(val==='夜'){
-              if(rules.restAfterNight){
-                ensureRest(emp, i, 2, true);
-                capRest(emp, i);
-              }
-              enforceNightDay4(emp, i);
-            }
-            if(val==='中2' && rules.restAfterMid2){
-              const nextDay = dates[i+1];
-              if(rules.allowDoubleMid2 && nextDay && getVal(newData, nextDay, emp)==='中2') continue;
-              ensureRest(emp, i, 2, true);
-              capRest(emp, i);
-            }
-          }
-        }
-      }
-      for(const e of employees){
-        let run = 0;
-        for(const day of dates){
-          const v = getVal(newData, day, e);
-          if(isWork(v)){
-            run++;
-            if(run>6){
-              const row = { ...(newData[day]||{}) };
-              if(row[e]!=='夜' && row[e]!=='中2'){
-                row[e] = '休';
-                newData[day] = row;
-                run = 0;
-              }
-            }
-          } else {
-            run = 0;
-          }
-        }
-      }
-      return newData;
-    }
-
-    const MenuButton = ({active, icon, children, onClick}) => (
-      <button onClick={onClick} className={`relative w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 ${active? 'bg-indigo-50 text-indigo-700 side-active' : 'hover:bg-gray-100 text-gray-700'} `}>
-        <Icon name={icon} className={active? 'text-indigo-600' : 'text-gray-500'} />
-        <span className="text-sm font-medium">{children}</span>
+    });
+    const MenuButton = ({ active, icon, children, onClick }) => (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`group relative w-full flex items-center gap-3 rounded-2xl border transition-all duration-200 ${active
+          ? 'border-transparent bg-gradient-to-r from-indigo-500 via-sky-500 to-cyan-500 text-white shadow-lg shadow-indigo-200/60'
+          : 'border-transparent bg-white/70 text-gray-600 hover:border-indigo-100 hover:bg-white hover:shadow-md'}`}
+      >
+        <span className={`flex h-9 w-9 items-center justify-center rounded-xl transition-colors ${active
+          ? 'bg-white/20 text-white'
+          : 'bg-indigo-50 text-indigo-500 group-hover:bg-indigo-100 group-hover:text-indigo-600'}`}>
+          <Icon name={icon} />
+        </span>
+        <span className="text-sm font-medium tracking-wide">{children}</span>
+        {active && <span className="ml-auto h-2 w-2 rounded-full bg-white/80 shadow"></span>}
       </button>
     );
 
     function SideDock({tab,setTab, menuPerms}){
-      const [open,setOpen]=useState(false);
+      const [open, setOpen] = useState(false);
+      const [hovering, setHovering] = useState(false);
+      const expanded = open || hovering;
       const items = [
         { key:'grid', icon:'grid', label:'排班表格' },
         { key:'batch', icon:'magic', label:'自动分配班次' },
@@ -843,15 +546,26 @@
         { key:'roles', icon:'lock', label:'角色设置' }
       ];
       return (
-        <div className={`dock fixed left-0 top-16 bottom-6 w-11 z-40 flex items-center`} onMouseEnter={()=>setOpen(true)} onMouseLeave={()=>setOpen(false)}>
-          <div className={`dock-panel absolute left-2 top-0 bottom-0 w-60 transform transition-transform duration-200 ${open? 'translate-x-0':'-translate-x-[115%]'} bg-white rounded-xl shadow p-2 border`}>
+        <div
+          className="dock fixed left-4 top-28 bottom-12 z-40 flex items-center"
+          onMouseEnter={()=> setHovering(true)}
+          onMouseLeave={()=> setHovering(false)}
+        >
+          <div
+            className={`dock-panel absolute left-0 top-0 bottom-0 w-64 transform transition-all duration-300 ${expanded ? 'translate-x-0 opacity-100' : '-translate-x-[120%] opacity-0 pointer-events-none'} bg-white/90 backdrop-blur-xl rounded-3xl border border-indigo-100 shadow-2xl shadow-indigo-100/50 p-3 space-y-2`}
+          >
             {items.filter(item=> menuPerms?.[item.key]?.visible).map(item=> (
               <MenuButton key={item.key} active={tab===item.key} icon={item.icon} onClick={()=>setTab(item.key)}>{item.label}</MenuButton>
             ))}
           </div>
-          <div className="dock-tab absolute right-[-12px] top-1/2 -translate-y-1/2 w-6 h-18 rounded-r-lg flex items-center justify-center bg-white text-gray-700 cursor-pointer shadow" onClick={()=>setOpen(v=>!v)}>
-            <svg viewBox="0 0 20 20" className="w-4 h-4"><path d="M12 4l-6 6 6 6" fill="none" stroke="currentColor" strokeWidth="2"/></svg>
-          </div>
+          <button
+            type="button"
+            className={`dock-tab relative ml-3 flex h-12 w-12 items-center justify-center rounded-full border text-indigo-500 shadow-lg transition-all duration-300 ${expanded ? 'border-indigo-200 bg-white/90 shadow-indigo-200/70' : 'border-indigo-100 bg-white/80 hover:bg-white'}`}
+            onClick={()=> setOpen(v=> !v)}
+          >
+            <span className="sr-only">{expanded ? '收起导航' : '展开导航'}</span>
+            <svg viewBox="0 0 20 20" className={`h-5 w-5 transition-transform ${expanded ? 'rotate-180' : ''}`}><path d="M12.5 4.5l-5 5.5 5 5.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </button>
         </div>
       );
     }
@@ -874,25 +588,82 @@
     }
 
     function LoginModal({onSuccess, accounts}){
-      const [username, setUsername] = useState('admin');
-      const [password, setPassword] = useState('admin');
+      const [username, setUsername] = useState('');
+      const [password, setPassword] = useState('');
+      const [remember, setRemember] = useState(false);
       const [err, setErr] = useState('');
       const [loading, setLoading] = useState(false);
+      useEffect(()=>{
+        try{
+          const raw = localStorage.getItem(LOGIN_STORAGE_KEY);
+          if(!raw) return;
+          const parsed = JSON.parse(raw);
+          if(parsed && typeof parsed === 'object'){
+            const expiresAt = typeof parsed.expiresAt === 'number' ? parsed.expiresAt : 0;
+            if(expiresAt && expiresAt > Date.now()){
+              const savedUsername = typeof parsed.username === 'string' ? parsed.username : '';
+              const savedPassword = decodeCredential(parsed.password || '');
+              setUsername(savedUsername);
+              setPassword(savedPassword);
+              setRemember(true);
+            } else {
+              localStorage.removeItem(LOGIN_STORAGE_KEY);
+            }
+          }
+        }catch{}
+      }, []);
+      const persistLogin = (shouldRemember, nextUsername, nextPassword)=>{
+        try{
+          if(shouldRemember && nextUsername && nextPassword){
+            const payload = {
+              username: nextUsername,
+              password: encodeCredential(nextPassword),
+              expiresAt: Date.now() + LOGIN_STORAGE_TTL
+            };
+            localStorage.setItem(LOGIN_STORAGE_KEY, JSON.stringify(payload));
+          } else {
+            localStorage.removeItem(LOGIN_STORAGE_KEY);
+          }
+        }catch{}
+      };
       async function doLogin(e){
         e.preventDefault();
         setErr('');
-        const accountEntry = Array.isArray(accounts) ? accounts.find(acc=> acc.username === username) : null;
-        if(accountEntry && username !== 'admin'){
+        const trimmedUsername = username.trim();
+        if(!trimmedUsername || !password){
+          setErr('请输入账号和密码');
+          return;
+        }
+        if(trimmedUsername !== username){
+          setUsername(trimmedUsername);
+        }
+        const accountEntry = Array.isArray(accounts) ? accounts.find(acc=> acc.username === trimmedUsername) : null;
+        if(accountEntry){
           if(!verifyPassword(accountEntry.passwordHash, password)){
             setErr('密码错误');
             return;
           }
+          if(trimmedUsername === ADMIN_USERNAME){
+            try{
+              setLoading(true);
+              const res = await apiPost('/login', { username: trimmedUsername, password });
+              persistLogin(remember, trimmedUsername, password);
+              onSuccess({ ...res.user, localAccount: false });
+            } catch(ex){
+              setErr(ex.message||'登录失败');
+            } finally {
+              setLoading(false);
+            }
+            return;
+          }
+          persistLogin(remember, trimmedUsername, password);
           onSuccess({ username: accountEntry.username, display_name: accountEntry.displayName || accountEntry.username, role: accountEntry.role, localAccount: true });
           return;
         }
         try{
           setLoading(true);
-          const res = await apiPost('/login', { username, password });
+          const res = await apiPost('/login', { username: trimmedUsername, password });
+          persistLogin(remember, trimmedUsername, password);
           onSuccess(res.user);
         } catch(ex){
           setErr(ex.message||'登录失败');
@@ -921,6 +692,12 @@
                   onCompositionEnd={(e)=>setPassword(e.target.value)}
                   onChange={e=>setPassword(e.target.value)} />
               </div>
+              <label className="flex items-center gap-2 text-sm text-gray-600">
+                <input type="checkbox" className="rounded border-gray-300" disabled={loading}
+                  checked={remember}
+                  onChange={e=> setRemember(e.target.checked)} />
+                <span>记住账号密码（保存30天）</span>
+              </label>
               {err && <div className="text-sm text-red-600">{err}</div>}
               <button type="submit" disabled={loading} className={`w-full rounded-full text-white py-2 transition flex items-center justify-center gap-2 ${loading?'bg-indigo-400 cursor-not-allowed':'bg-indigo-600 hover:bg-indigo-500'}`}>
                 {loading && <Spinner className="w-4 h-4 text-white" />}
@@ -1077,13 +854,24 @@
 
       const [team, setTeam] = useState(()=> (orgConfig.teams?.[0]?.id || 'default'));
       const [note, setNote] = useState('');
-      const [start, setStart] = useState(defaultStart);
-      const [end, setEnd]     = useState(defaultEnd);
+      const [planStart, setPlanStart] = useState(defaultStart);
+      const [planEnd, setPlanEnd]     = useState(defaultEnd);
+      const [viewStart, setViewStart] = useState(defaultStart);
+      const [viewEnd, setViewEnd]     = useState(defaultEnd);
+      const viewManuallyAdjustedRef = useRef(false);
       const [employees, setEmployees] = useState([]);
       const [data, setData] = useState({});
       const [versionId, setVersionId] = useState(null);
       const [versions, setVersions]   = useState([]);
       const [versionsLoading, setVersionsLoading] = useState(false);
+      const [showAutoSaves, setShowAutoSaves] = useState(false);
+      const filteredVersions = useMemo(()=>{
+        if(showAutoSaves) return versions;
+        return versions.filter(v=>{
+          const operator = (v?.created_by_name || v?.created_by || '').trim();
+          return operator !== '自动保存';
+        });
+      }, [versions, showAutoSaves]);
       const [versionDeletingId, setVersionDeletingId] = useState(null);
       const [toast, setToast] = useState(null);
       const toastTimerRef = useRef(null);
@@ -1122,6 +910,14 @@
       const [albumAutoNote, setAlbumAutoNote] = useState('');
       const [albumHistory, setAlbumHistory] = useState([]);
       const [accountPasswordDrafts, setAccountPasswordDrafts] = useState({});
+      const importInputRef = useRef(null);
+      const [importing, setImporting] = useState(false);
+
+      useEffect(()=>{
+        if(viewManuallyAdjustedRef.current) return;
+        setViewStart(planStart);
+        setViewEnd(planEnd);
+      }, [planStart, planEnd]);
 
       const [shiftColors, setShiftColors] = useState({ ...defaultShiftColors });
       const [staffingAlerts, setStaffingAlerts] = useState(()=> normalizeStaffingAlerts());
@@ -1144,6 +940,13 @@
       const skipLoadRef = useRef(false);
       const initializedRef = useRef(false);
 
+      const snapshotRef = useRef(null);
+      const lastSavedSnapshotRef = useRef('');
+      const pendingAutoSaveRef = useRef(false);
+      const [autoSaveTicker, setAutoSaveTicker] = useState(0);
+      const autoSaveSendingRef = useRef(false);
+      const initialTeamSyncRef = useRef({});
+
       useEffect(()=>{
         if(skipLoadRef.current){
           skipLoadRef.current = false;
@@ -1153,8 +956,13 @@
         const fallback = createEmptyTeamState(defaultStart, defaultEnd);
         const merged = base ? { ...fallback, ...base } : fallback;
         skipSaveRef.current = true;
-        setStart(merged.start || defaultStart);
-        setEnd(merged.end || defaultEnd);
+        const nextPlanStart = merged.start || defaultStart;
+        const nextPlanEnd = merged.end || defaultEnd;
+        setPlanStart(nextPlanStart);
+        setPlanEnd(nextPlanEnd);
+        viewManuallyAdjustedRef.current = false;
+        setViewStart(merged.viewStart || nextPlanStart);
+        setViewEnd(merged.viewEnd || nextPlanEnd);
         setEmployees(Array.isArray(merged.employees) ? merged.employees : []);
         setData(merged.data || {});
         setVersionId(merged.versionId || null);
@@ -1162,8 +970,8 @@
         setStaffingAlerts(normalizeStaffingAlerts(merged.staffingAlerts));
         setAdminDays(Number(merged.adminDays||0));
         setRestPrefs(sanitizeRestPrefsMap(merged.restPrefs||{}));
-        const wins = Array.isArray(merged.nightWindows) && merged.nightWindows.length ? merged.nightWindows : [{ s: merged.start || defaultStart, e: merged.end || defaultEnd }];
-        setNightWindows(wins.map(w=> ({ s: w.s || defaultStart, e: w.e || defaultEnd })));
+        const wins = Array.isArray(merged.nightWindows) && merged.nightWindows.length ? merged.nightWindows : [{ s: nextPlanStart, e: nextPlanEnd }];
+        setNightWindows(wins.map(w=> ({ s: w.s || nextPlanStart, e: w.e || nextPlanEnd })));
         setNightOverride(merged.nightOverride !== undefined ? !!merged.nightOverride : true);
         setNightRules(normalizeNightRules(merged.nightRules));
         setRMin(typeof merged.rMin === 'number' ? merged.rMin : 0.3);
@@ -1177,8 +985,8 @@
         setAlbumSelected(merged.albumSelected || {});
         setAlbumWhiteHour(typeof merged.albumWhiteHour === 'number' ? merged.albumWhiteHour : 0.22);
         setAlbumMidHour(typeof merged.albumMidHour === 'number' ? merged.albumMidHour : 0.06);
-        const startMonth = (merged.albumRangeStartMonth || (merged.start || defaultStart)).slice(0,7);
-        const endMonth = (merged.albumRangeEndMonth || (merged.end || defaultEnd)).slice(0,7);
+        const startMonth = (merged.albumRangeStartMonth || nextPlanStart).slice(0,7);
+        const endMonth = (merged.albumRangeEndMonth || nextPlanEnd).slice(0,7);
         setAlbumRangeStartMonth(startMonth);
         setAlbumRangeEndMonth(endMonth);
         setAlbumMaxDiff(typeof merged.albumMaxDiff === 'number' ? merged.albumMaxDiff : 0.5);
@@ -1196,8 +1004,10 @@
           return;
         }
         const snapshot = {
-          start,
-          end,
+          start: planStart,
+          end: planEnd,
+          viewStart,
+          viewEnd,
           employees,
           data,
           versionId,
@@ -1227,18 +1037,42 @@
           historyProfile,
           yearlyOptimize
         };
+        const snapshotForRef = {
+          ...snapshot,
+          employees: Array.isArray(employees) ? employees.slice() : [],
+          shiftColors: { ...shiftColors },
+          staffingAlerts: { ...staffingAlerts },
+          restPrefs: sanitizeRestPrefsMap(restPrefs),
+          nightWindows: Array.isArray(nightWindows) ? nightWindows.map(w=> ({ s: w.s, e: w.e })) : [],
+          batchChecked: batchChecked ? { ...batchChecked } : {},
+          albumSelected: albumSelected ? { ...albumSelected } : {},
+          albumAssignments: albumAssignments ? { ...albumAssignments } : {},
+          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []
+        };
+        snapshotRef.current = snapshotForRef;
+        let serialized = '';
+        try{ serialized = JSON.stringify(snapshotForRef); }catch(e){ serialized = ''; }
+        if(serialized && serialized === lastSavedSnapshotRef.current){
+          pendingAutoSaveRef.current = false;
+        } else {
+          const shouldQueue = snapshotHasMeaningfulData(snapshotForRef) && serialized !== lastSavedSnapshotRef.current;
+          pendingAutoSaveRef.current = shouldQueue;
+          if(shouldQueue){
+            setAutoSaveTicker(tick=> tick + 1);
+          }
+        }
         skipLoadRef.current = true;
         setTeamStateMap(prev=> ({ ...prev, [team]: snapshot }));
-      }, [team, start, end, employees, data, versionId, shiftColors, staffingAlerts, adminDays, restPrefs, nightWindows, nightOverride, nightRules, rMin, rMax, pMin, pMax, mixMax, note, batchChecked, albumSelected, albumWhiteHour, albumMidHour, albumRangeStartMonth, albumRangeEndMonth, albumMaxDiff, albumAssignments, albumAutoNote, albumHistory, historyProfile, yearlyOptimize]);
+      }, [team, planStart, planEnd, viewStart, viewEnd, employees, data, versionId, shiftColors, staffingAlerts, adminDays, restPrefs, nightWindows, nightOverride, nightRules, rMin, rMax, pMin, pMax, mixMax, note, batchChecked, albumSelected, albumWhiteHour, albumMidHour, albumRangeStartMonth, albumRangeEndMonth, albumMaxDiff, albumAssignments, albumAutoNote, albumHistory, historyProfile, yearlyOptimize]);
 
       const REST_STORE_KEY = 'scheduler_restprefs_store_v2';
       function restStoreKey(team,start,end){ return `${team}__${start}__${end}`; }
       function loadRestStore(){ try{ return JSON.parse(localStorage.getItem(REST_STORE_KEY)||'{}'); }catch{ return {}; } }
       function saveRestStore(map){ try{ localStorage.setItem(REST_STORE_KEY, JSON.stringify(map||{})); }catch{} }
-      function saveRestForView(){ const map = loadRestStore(); map[restStoreKey(team,start,end)] = restPrefs; saveRestStore(map); }
-      function tryRestoreRestForView(){ const map = loadRestStore(); const hit = map[restStoreKey(team,start,end)]; if(hit && Object.keys(hit).length){ setRestPrefs(sanitizeRestPrefsMap(hit)); } }
-      useEffect(()=>{ if(Object.keys(restPrefs||{}).length) saveRestForView(); }, [restPrefs, team, start, end]);
-      useEffect(()=>{ tryRestoreRestForView(); }, [team, start, end]);
+      function saveRestForView(){ const map = loadRestStore(); map[restStoreKey(team,planStart,planEnd)] = restPrefs; saveRestStore(map); }
+      function tryRestoreRestForView(){ const map = loadRestStore(); const hit = map[restStoreKey(team,planStart,planEnd)]; if(hit && Object.keys(hit).length){ setRestPrefs(sanitizeRestPrefsMap(hit)); } }
+      useEffect(()=>{ if(Object.keys(restPrefs||{}).length) saveRestForView(); }, [restPrefs, team, planStart, planEnd]);
+      useEffect(()=>{ tryRestoreRestForView(); }, [team, planStart, planEnd]);
 
       const teamsList = orgConfig.teams || [];
       const accountConfig = useMemo(()=>{
@@ -1248,17 +1082,62 @@
       const accessibleTeams = useMemo(()=>{
         if(!user) return teamsList;
         if(!accountConfig) return teamsList;
-        const access = Array.isArray(accountConfig.teamAccess) && accountConfig.teamAccess.length ? accountConfig.teamAccess : ['*'];
+        const access = Array.isArray(accountConfig.teamAccess) ? accountConfig.teamAccess : ['*'];
         if(access.includes('*')) return teamsList;
         const allow = new Set(access);
         const filtered = teamsList.filter(t=> allow.has(t.id));
-        return filtered.length ? filtered : teamsList;
+        if(filtered.length) return filtered;
+        return access.length === 0 ? [] : teamsList;
       }, [teamsList, accountConfig, user]);
       useEffect(()=>{
         if(!accessibleTeams.some(t=> t.id === team) && accessibleTeams.length){
           setTeam(accessibleTeams[0].id);
         }
       }, [accessibleTeams, team]);
+
+      useEffect(()=>{
+        if(!user) return;
+        const teamsToLoad = accessibleTeams.map(t=> t.id).filter(Boolean);
+        if(!teamsToLoad.length) return;
+        let cancelled = false;
+        (async()=>{
+          for(const teamId of teamsToLoad){
+            if(cancelled) return;
+            if(initialTeamSyncRef.current[teamId]) continue;
+            initialTeamSyncRef.current[teamId] = true;
+            try{
+              const params = new URLSearchParams();
+              params.set('team', teamId);
+              const res = await apiGet(`/schedule?${params.toString()}`);
+              if(cancelled) return;
+              const payload = { ...res, versionId: res.version_id || res.versionId };
+              const version = payload.versionId || null;
+              if(teamId === team){
+                if(pendingAutoSaveRef.current){
+                  initialTeamSyncRef.current[teamId] = false;
+                  continue;
+                }
+                if(version !== null && snapshotRef.current && snapshotRef.current.versionId === version) continue;
+                applyServerState(payload);
+              } else {
+                const otherSnapshot = convertPayloadToTeamState(payload, { start: defaultStart, end: defaultEnd });
+                if(otherSnapshot){
+                  setTeamStateMap(prev=> ({ ...prev, [teamId]: otherSnapshot }));
+                }
+              }
+              if(version){
+                lastLoadedVersionRef.current[teamId] = version;
+              }
+            }catch(e){
+              initialTeamSyncRef.current[teamId] = false;
+              if(!cancelled){
+                console.warn('加载团队最新排班失败', teamId, e);
+              }
+            }
+          }
+        })();
+        return ()=>{ cancelled = true; };
+      }, [user, accessibleTeams, team, defaultStart, defaultEnd]);
 
       const activeTeam = useMemo(()=> teamsList.find(t=> t.id === team) || teamsList[0] || { id: team, name: team, features:{ albumScheduler:true } }, [teamsList, team]);
       const teamFeatures = activeTeam?.features || { albumScheduler:true };
@@ -1432,41 +1311,66 @@
       const setAccountAllTeams = (username, enabled)=>{
         updateAccountConfig(username, acc=> ({ ...acc, teamAccess: enabled ? ['*'] : [] }));
       };
-      const toggleAccountTeam = (username, teamId)=>{
+      const setAccountTeamAccess = (username, teamId, enabled)=>{
         updateAccountConfig(username, acc=>{
-          if(acc.teamAccess && acc.teamAccess.includes('*')){
-            const rest = teamsList.filter(t=> t.id !== teamId).map(t=>t.id);
-            return { ...acc, teamAccess: rest.length ? rest : ['*'] };
-          }
-          const set = new Set(acc.teamAccess||[]);
-          if(set.has(teamId)){
-            if(set.size<=1){
-              alert('至少保留一个团队');
-              return acc;
-            }
-            set.delete(teamId);
+          const allIds = teamsList.map(t=> t.id);
+          let current = acc.teamAccess && acc.teamAccess.includes('*') ? allIds.slice() : Array.from(new Set(acc.teamAccess||[]));
+          if(enabled){
+            if(!current.includes(teamId)) current.push(teamId);
           } else {
-            set.add(teamId);
+            current = current.filter(id=> id!==teamId);
           }
-          if(set.size === teamsList.length){
+          if(current.length >= allIds.length && allIds.length){
             return { ...acc, teamAccess:['*'] };
           }
-          return { ...acc, teamAccess: Array.from(set) };
+          return { ...acc, teamAccess: current };
         });
       };
 
       const lastLoadedVersionRef = useRef({});
       const autoLoadedTeamRef = useRef({});
       useEffect(()=>{ lastLoadedVersionRef.current = {}; autoLoadedTeamRef.current = {}; }, [user?.username]);
+      useEffect(()=>{
+        snapshotRef.current = null;
+        lastSavedSnapshotRef.current = '';
+        pendingAutoSaveRef.current = false;
+        autoSaveSendingRef.current = false;
+        initialTeamSyncRef.current = {};
+        if(user){
+          setTeamStateMap({});
+        }
+      }, [user?.username]);
       const autoLoadKey = useMemo(()=>{
         const safeTeam = team || 'default';
-        const safeStart = (start || '').slice(0,10);
-        const safeEnd = (end || '').slice(0,10);
+        const safeStart = (planStart || '').slice(0,10);
+        const safeEnd = (planEnd || '').slice(0,10);
         const flag = yearlyOptimize ? 'on' : 'off';
         return `${safeTeam}__${flag}__${safeStart}__${safeEnd}`;
-      }, [team, start, end, yearlyOptimize]);
-      function applyServerState(payload){
-        if(!payload || typeof payload !== 'object') return;
+      }, [team, planStart, planEnd, yearlyOptimize]);
+      function snapshotHasMeaningfulData(snapshot){
+        if(!snapshot || typeof snapshot !== 'object') return false;
+        if(Array.isArray(snapshot.employees) && snapshot.employees.length) return true;
+        if(typeof snapshot.note === 'string' && snapshot.note.trim()) return true;
+        if(Number(snapshot.adminDays||0) > 0) return true;
+        if(snapshot.restPrefs && Object.keys(snapshot.restPrefs).length) return true;
+        if(snapshot.albumAutoNote && snapshot.albumAutoNote.trim()) return true;
+        if(snapshot.albumAssignments && Object.keys(snapshot.albumAssignments).length) return true;
+        if(Array.isArray(snapshot.albumHistory) && snapshot.albumHistory.length) return true;
+        const data = snapshot.data || {};
+        for(const day in data){
+          const row = data[day] || {};
+          for(const emp in row){
+            const val = row[emp];
+            if(val !== undefined && val !== null && String(val).trim() !== ''){
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+
+      function convertPayloadToTeamState(payload, fallback = {}){
+        if(!payload || typeof payload !== 'object') return null;
         const get = (...keys)=>{
           for(const key of keys){
             if(payload[key] !== undefined && payload[key] !== null){
@@ -1475,164 +1379,507 @@
           }
           return undefined;
         };
-        const viewStart = get('viewStart','view_start','start');
-        const viewEnd = get('viewEnd','view_end','end');
-        if(typeof viewStart === 'string' && viewStart){ setStart(viewStart.slice(0,10)); }
-        if(typeof viewEnd === 'string' && viewEnd){ setEnd(viewEnd.slice(0,10)); }
-        const version = get('versionId','version_id');
-        if(version){ setVersionId(version); }
+        const fallbackStart = typeof fallback.start === 'string' && fallback.start ? fallback.start.slice(0,10) : (planStart || defaultStart);
+        const fallbackEnd = typeof fallback.end === 'string' && fallback.end ? fallback.end.slice(0,10) : (planEnd || defaultEnd);
+        const startRaw = get('start','planStart','viewStart','view_start');
+        const endRaw = get('end','planEnd','viewEnd','view_end');
+        const resolvedStart = typeof startRaw === 'string' && startRaw ? startRaw.slice(0,10) : fallbackStart.slice(0,10);
+        const resolvedEnd = typeof endRaw === 'string' && endRaw ? endRaw.slice(0,10) : fallbackEnd.slice(0,10);
+        const viewStartRaw = get('viewStart','view_start');
+        const viewEndRaw = get('viewEnd','view_end');
+        const resolvedViewStart = typeof viewStartRaw === 'string' && viewStartRaw ? viewStartRaw.slice(0,10) : resolvedStart;
+        const resolvedViewEnd = typeof viewEndRaw === 'string' && viewEndRaw ? viewEndRaw.slice(0,10) : resolvedEnd;
         const employeesPayload = get('employees');
-        if(Array.isArray(employeesPayload)){ setEmployees(employeesPayload); }
+        const employees = Array.isArray(employeesPayload) ? employeesPayload.map(e=> typeof e === 'string' ? e : String(e)) : [];
         const dataPayload = get('data');
-        if(dataPayload && typeof dataPayload === 'object'){ setData(dataPayload); }
+        const data = (dataPayload && typeof dataPayload === 'object' && !Array.isArray(dataPayload)) ? dataPayload : {};
+        const shiftColorsPayload = get('shiftColors','shift_colors');
+        const shiftColorsState = shiftColorsPayload && typeof shiftColorsPayload === 'object' ? { ...defaultShiftColors, ...shiftColorsPayload } : { ...defaultShiftColors };
+        const staffingPayload = get('staffingAlerts','staffing_alerts');
+        const staffingAlertsState = normalizeStaffingAlerts(staffingPayload);
+        const adminDaysVal = Number(get('adminDays','admin_days') || 0);
         const restPayload = get('restPrefs','rest_prefs');
-        if(restPayload){ setRestPrefs(sanitizeRestPrefsMap(restPayload)); }
-        const nightRulesPayload = get('nightRules','night_rules');
-        if(nightRulesPayload){ setNightRules(normalizeNightRules(nightRulesPayload)); }
+        const restPrefsState = sanitizeRestPrefsMap(restPayload || {});
         const nightWindowsPayload = get('nightWindows','night_windows');
+        let nightWindowsState = [{ s: resolvedStart, e: resolvedEnd }];
         if(Array.isArray(nightWindowsPayload) && nightWindowsPayload.length){
-          setNightWindows(nightWindowsPayload.map(w=> ({
-            s: typeof w?.s === 'string' ? w.s : (typeof w?.start === 'string' ? w.start : start),
-            e: typeof w?.e === 'string' ? w.e : (typeof w?.end === 'string' ? w.end : end)
-          })));
+          nightWindowsState = nightWindowsPayload.map(w=> ({
+            s: typeof w?.s === 'string' && w.s ? w.s : (typeof w?.start === 'string' ? w.start : resolvedStart),
+            e: typeof w?.e === 'string' && w.e ? w.e : (typeof w?.end === 'string' ? w.end : resolvedEnd)
+          }));
         }
         const nightOverridePayload = get('nightOverride','night_override');
-        if(typeof nightOverridePayload === 'boolean'){ setNightOverride(nightOverridePayload); }
-        const adminDaysPayload = get('adminDays','admin_days');
-        if(typeof adminDaysPayload === 'number'){ setAdminDays(adminDaysPayload); }
-        const shiftPayload = get('shiftColors','shift_colors');
-        if(shiftPayload && typeof shiftPayload === 'object'){
-          setShiftColors(prev=> ({ ...defaultShiftColors, ...prev, ...shiftPayload }));
-        }
-        const staffingPayload = get('staffingAlerts','staffing_alerts');
-        if(staffingPayload){
-          setStaffingAlerts(normalizeStaffingAlerts(staffingPayload));
-        }
-        const notePayload = get('note','remark');
-        if(typeof notePayload === 'string'){ setNote(notePayload); }
+        const nightRulesPayload = get('nightRules','night_rules');
         const rMinPayload = get('rMin','r_min');
-        if(typeof rMinPayload === 'number'){ setRMin(rMinPayload); }
         const rMaxPayload = get('rMax','r_max');
-        if(typeof rMaxPayload === 'number'){ setRMax(rMaxPayload); }
         const pMinPayload = get('pMin','p_min');
-        if(typeof pMinPayload === 'number'){ setPMin(pMinPayload); }
         const pMaxPayload = get('pMax','p_max');
-        if(typeof pMaxPayload === 'number'){ setPMax(pMaxPayload); }
         const mixMaxPayload = get('mixMax','mix_max');
-        if(typeof mixMaxPayload === 'number'){ setMixMax(mixMaxPayload); }
+        const notePayload = get('note','remark');
         const batchPayload = get('batchChecked','batch_checked');
-        if(batchPayload && typeof batchPayload === 'object'){ setBatchChecked({ ...batchPayload }); }
         const albumSelectedPayload = get('albumSelected','album_selected');
-        if(albumSelectedPayload && typeof albumSelectedPayload === 'object'){ setAlbumSelected({ ...albumSelectedPayload }); }
         const albumWhitePayload = get('albumWhiteHour','album_white_hour');
-        if(typeof albumWhitePayload === 'number'){ setAlbumWhiteHour(albumWhitePayload); }
         const albumMidPayload = get('albumMidHour','album_mid_hour');
-        if(typeof albumMidPayload === 'number'){ setAlbumMidHour(albumMidPayload); }
         const albumRangeStartPayload = get('albumRangeStartMonth','album_range_start_month');
-        if(typeof albumRangeStartPayload === 'string'){ setAlbumRangeStartMonth(albumRangeStartPayload); }
         const albumRangeEndPayload = get('albumRangeEndMonth','album_range_end_month');
-        if(typeof albumRangeEndPayload === 'string'){ setAlbumRangeEndMonth(albumRangeEndPayload); }
         const albumMaxDiffPayload = get('albumMaxDiff','album_max_diff');
-        if(typeof albumMaxDiffPayload === 'number'){ setAlbumMaxDiff(albumMaxDiffPayload); }
         const albumAssignmentsPayload = get('albumAssignments','album_assignments');
-        if(albumAssignmentsPayload && typeof albumAssignmentsPayload === 'object'){
-          try{
-            setAlbumAssignments(JSON.parse(JSON.stringify(albumAssignmentsPayload)));
-          }catch{
-            setAlbumAssignments({ ...albumAssignmentsPayload });
+        const albumAutoNotePayload = get('albumAutoNote','album_auto_note');
+        const albumHistoryPayload = get('albumHistory','album_history');
+        const historyProfilePayload = get('historyProfile','history_profile');
+        const yearlyOptimizePayload = get('yearlyOptimize','year_optimize');
+        const versionPayload = get('versionId','version_id');
+        return {
+          start: resolvedStart,
+          end: resolvedEnd,
+          viewStart: resolvedViewStart,
+          viewEnd: resolvedViewEnd,
+          employees,
+          data,
+          versionId: versionPayload !== undefined && versionPayload !== null ? versionPayload : null,
+          shiftColors: shiftColorsState,
+          staffingAlerts: staffingAlertsState,
+          adminDays: adminDaysVal,
+          restPrefs: restPrefsState,
+          nightWindows: nightWindowsState,
+          nightOverride: nightOverridePayload !== undefined ? !!nightOverridePayload : true,
+          nightRules: normalizeNightRules(nightRulesPayload),
+          rMin: typeof rMinPayload === 'number' ? rMinPayload : 0.3,
+          rMax: typeof rMaxPayload === 'number' ? rMaxPayload : 0.7,
+          pMin: typeof pMinPayload === 'number' ? pMinPayload : 0.3,
+          pMax: typeof pMaxPayload === 'number' ? pMaxPayload : 0.7,
+          mixMax: typeof mixMaxPayload === 'number' ? mixMaxPayload : 1,
+          note: typeof notePayload === 'string' ? notePayload : '',
+          batchChecked: batchPayload && typeof batchPayload === 'object' ? batchPayload : {},
+          albumSelected: albumSelectedPayload && typeof albumSelectedPayload === 'object' ? albumSelectedPayload : {},
+          albumWhiteHour: typeof albumWhitePayload === 'number' ? albumWhitePayload : 0.22,
+          albumMidHour: typeof albumMidPayload === 'number' ? albumMidPayload : 0.06,
+          albumRangeStartMonth: (typeof albumRangeStartPayload === 'string' && albumRangeStartPayload ? albumRangeStartPayload : resolvedStart).slice(0,7),
+          albumRangeEndMonth: (typeof albumRangeEndPayload === 'string' && albumRangeEndPayload ? albumRangeEndPayload : resolvedEnd).slice(0,7),
+          albumMaxDiff: typeof albumMaxDiffPayload === 'number' ? albumMaxDiffPayload : 0.5,
+          albumAssignments: albumAssignmentsPayload && typeof albumAssignmentsPayload === 'object' ? albumAssignmentsPayload : {},
+          albumAutoNote: typeof albumAutoNotePayload === 'string' ? albumAutoNotePayload : '',
+          albumHistory: Array.isArray(albumHistoryPayload) ? albumHistoryPayload.map(item=> ({ ...item, assignments: item?.assignments || {} })) : [],
+          historyProfile: historyProfilePayload || null,
+          yearlyOptimize: yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1'
+        };
+      }
+
+      function applyServerState(payload){
+        if(!payload || typeof payload !== 'object') return;
+        const snapshot = convertPayloadToTeamState(payload, { start: planStart, end: planEnd });
+        if(!snapshot) return;
+        skipSaveRef.current = true;
+        viewManuallyAdjustedRef.current = false;
+        setPlanStart(snapshot.start);
+        setPlanEnd(snapshot.end);
+        setViewStart(snapshot.viewStart);
+        setViewEnd(snapshot.viewEnd);
+        setEmployees(Array.isArray(snapshot.employees) ? snapshot.employees.slice() : []);
+        setData(snapshot.data || {});
+        setVersionId(snapshot.versionId || null);
+        setShiftColors({ ...snapshot.shiftColors });
+        setStaffingAlerts({ ...snapshot.staffingAlerts });
+        setAdminDays(Number(snapshot.adminDays || 0));
+        setRestPrefs(sanitizeRestPrefsMap(snapshot.restPrefs || {}));
+        setNightWindows((snapshot.nightWindows || [{ s: snapshot.start, e: snapshot.end }]).map(w=> ({ s: w.s, e: w.e })));
+        setNightOverride(snapshot.nightOverride !== undefined ? !!snapshot.nightOverride : true);
+        setNightRules(normalizeNightRules(snapshot.nightRules));
+        setRMin(typeof snapshot.rMin === 'number' ? snapshot.rMin : 0.3);
+        setRMax(typeof snapshot.rMax === 'number' ? snapshot.rMax : 0.7);
+        setPMin(typeof snapshot.pMin === 'number' ? snapshot.pMin : 0.3);
+        setPMax(typeof snapshot.pMax === 'number' ? snapshot.pMax : 0.7);
+        setMixMax(typeof snapshot.mixMax === 'number' ? snapshot.mixMax : 1);
+        setNote(typeof snapshot.note === 'string' ? snapshot.note : '');
+        setBatchChecked(snapshot.batchChecked ? { ...snapshot.batchChecked } : {});
+        setAlbumSelected(snapshot.albumSelected ? { ...snapshot.albumSelected } : {});
+        setAlbumWhiteHour(typeof snapshot.albumWhiteHour === 'number' ? snapshot.albumWhiteHour : 0.22);
+        setAlbumMidHour(typeof snapshot.albumMidHour === 'number' ? snapshot.albumMidHour : 0.06);
+        setAlbumRangeStartMonth((snapshot.albumRangeStartMonth || snapshot.start).slice(0,7));
+        setAlbumRangeEndMonth((snapshot.albumRangeEndMonth || snapshot.end).slice(0,7));
+        setAlbumMaxDiff(typeof snapshot.albumMaxDiff === 'number' ? snapshot.albumMaxDiff : 0.5);
+        setAlbumAssignments(snapshot.albumAssignments ? { ...snapshot.albumAssignments } : {});
+        setAlbumAutoNote(typeof snapshot.albumAutoNote === 'string' ? snapshot.albumAutoNote : '');
+        setAlbumHistory(Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []);
+        setHistoryProfile(snapshot.historyProfile || null);
+        setYearlyOptimize(snapshot.yearlyOptimize === true);
+        const snapshotClone = {
+          ...snapshot,
+          employees: Array.isArray(snapshot.employees) ? snapshot.employees.slice() : [],
+          data: snapshot.data || {},
+          shiftColors: { ...snapshot.shiftColors },
+          staffingAlerts: { ...snapshot.staffingAlerts },
+          restPrefs: sanitizeRestPrefsMap(snapshot.restPrefs || {}),
+          nightWindows: (snapshot.nightWindows || []).map(w=> ({ s: w.s, e: w.e })),
+          batchChecked: snapshot.batchChecked ? { ...snapshot.batchChecked } : {},
+          albumSelected: snapshot.albumSelected ? { ...snapshot.albumSelected } : {},
+          albumAssignments: snapshot.albumAssignments ? { ...snapshot.albumAssignments } : {},
+          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []
+        };
+        snapshotRef.current = snapshotClone;
+        lastSavedSnapshotRef.current = JSON.stringify(snapshotClone);
+        pendingAutoSaveRef.current = false;
+      }
+
+      function buildSavePayload(options = {}, snapshot = snapshotRef.current){
+        const base = snapshot || {
+          start: planStart,
+          end: planEnd,
+          viewStart,
+          viewEnd,
+          employees,
+          data,
+          versionId,
+          shiftColors,
+          staffingAlerts,
+          adminDays,
+          restPrefs: sanitizeRestPrefsMap(restPrefs),
+          nightWindows,
+          nightOverride,
+          nightRules,
+          rMin,
+          rMax,
+          pMin,
+          pMax,
+          mixMax,
+          note,
+          batchChecked,
+          albumSelected,
+          albumWhiteHour,
+          albumMidHour,
+          albumRangeStartMonth,
+          albumRangeEndMonth,
+          albumMaxDiff,
+          albumAssignments,
+          albumAutoNote,
+          albumHistory,
+          historyProfile,
+          yearlyOptimize
+        };
+        const noteValue = options.noteOverride !== undefined ? options.noteOverride : (base.note ?? note);
+        return {
+          team,
+          viewStart: base.viewStart || viewStart,
+          viewEnd: base.viewEnd || viewEnd,
+          start: base.start || planStart,
+          end: base.end || planEnd,
+          employees: base.employees || employees,
+          data: base.data || data,
+          baseVersionId: base.versionId ?? versionId,
+          note: noteValue,
+          operator: options.operatorOverride ?? ((user && (user.display_name || user.username)) || '管理员'),
+          adminDays: base.adminDays ?? adminDays,
+          restPrefs: base.restPrefs ?? sanitizeRestPrefsMap(restPrefs),
+          nightRules: base.nightRules ?? normalizeNightRules(nightRules),
+          nightWindows: base.nightWindows ?? nightWindows,
+          nightOverride: base.nightOverride ?? nightOverride,
+          rMin: base.rMin ?? rMin,
+          rMax: base.rMax ?? rMax,
+          pMin: base.pMin ?? pMin,
+          pMax: base.pMax ?? pMax,
+          mixMax: base.mixMax ?? mixMax,
+          shiftColors: base.shiftColors ?? shiftColors,
+          staffingAlerts: base.staffingAlerts ?? staffingAlerts,
+          batchChecked: base.batchChecked ?? batchChecked,
+          albumSelected: base.albumSelected ?? albumSelected,
+          albumWhiteHour: base.albumWhiteHour ?? albumWhiteHour,
+          albumMidHour: base.albumMidHour ?? albumMidHour,
+          albumRangeStartMonth: base.albumRangeStartMonth ?? albumRangeStartMonth,
+          albumRangeEndMonth: base.albumRangeEndMonth ?? albumRangeEndMonth,
+          albumMaxDiff: base.albumMaxDiff ?? albumMaxDiff,
+          albumAssignments: base.albumAssignments ?? albumAssignments,
+          albumAutoNote: base.albumAutoNote ?? albumAutoNote,
+          albumHistory: base.albumHistory ?? albumHistory,
+          historyProfile: base.historyProfile ?? historyProfile,
+          yearlyOptimize: base.yearlyOptimize ?? yearlyOptimize
+        };
+      }
+
+      function safeParseSnapshot(serialized){
+        if(typeof serialized !== 'string' || !serialized) return null;
+        try { return JSON.parse(serialized); } catch { return null; }
+      }
+
+      function cloneDataMap(data){
+        if(!data || typeof data !== 'object') return {};
+        const next = {};
+        Object.keys(data).forEach(day=>{
+          const row = data[day];
+          next[day] = row && typeof row === 'object' ? { ...row } : {};
+        });
+        return next;
+      }
+
+      function computeDataDiff(baseSnapshot, localSnapshot){
+        if(!baseSnapshot || !localSnapshot) return [];
+        const baseData = (baseSnapshot && typeof baseSnapshot.data === 'object') ? baseSnapshot.data : {};
+        const localData = (localSnapshot && typeof localSnapshot.data === 'object') ? localSnapshot.data : {};
+        const days = new Set([...Object.keys(baseData), ...Object.keys(localData)]);
+        const changes = [];
+        days.forEach(day=>{
+          const baseRow = baseData[day] || {};
+          const localRow = localData[day] || {};
+          const emps = new Set([...Object.keys(baseRow), ...Object.keys(localRow)]);
+          emps.forEach(emp=>{
+            const baseVal = (baseRow[emp] ?? '').toString();
+            const localValRaw = localRow[emp];
+            const localVal = localValRaw === undefined || localValRaw === null ? '' : String(localValRaw);
+            if(localVal !== baseVal){
+              changes.push({ day, emp, baseVal, value: localVal });
+            }
+          });
+        });
+        return changes;
+      }
+
+      function jsonEquals(a, b){
+        if(a === b) return true;
+        try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+      }
+
+      async function fetchLatestSchedulePayload(){
+        if(!team){
+          throw new Error('尚未选择团队，无法加载最新排班');
+        }
+        const params = new URLSearchParams();
+        if(team) params.set('team', team);
+        if(planStart) params.set('start', planStart);
+        if(planEnd) params.set('end', planEnd);
+        if(yearlyOptimize){
+          const yrMatch = (planStart || '').match(/^(\d{4})/);
+          if(yrMatch){
+            params.set('historyYearStart', `${yrMatch[1]}-01-01`);
+            params.set('yearOptimize', '1');
           }
         }
-        const albumAutoNotePayload = get('albumAutoNote','album_auto_note');
-        if(typeof albumAutoNotePayload === 'string'){ setAlbumAutoNote(albumAutoNotePayload); }
-        const albumHistoryPayload = get('albumHistory','album_history');
-        if(Array.isArray(albumHistoryPayload)){
-          setAlbumHistory(albumHistoryPayload.map(item=> ({ ...item, assignments: item?.assignments || {} })));
-        }
-        const historyPayload = get('historyProfile','history_profile');
-        if(historyPayload){ setHistoryProfile(historyPayload); }
-        const yearlyOptimizePayload = get('yearlyOptimize','year_optimize');
-        if(yearlyOptimizePayload !== undefined){
-          const enabled = yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1';
-          setYearlyOptimize(enabled);
-        }
-        tryRestoreRestForView();
+        const query = params.toString();
+        const res = await apiGet(`/schedule${query ? `?${query}` : ''}`);
+        return { ...res, versionId: res.version_id || res.versionId };
       }
+
+      async function resolveSaveConflict(reason, localSnapshot, options = {}){
+        let latestPayload;
+        try {
+          latestPayload = await fetchLatestSchedulePayload();
+        } catch(err){
+          globalErr(err?.message || '加载最新排班失败');
+          return { applied: 0, skipped: 0 };
+        }
+        if(!latestPayload){
+          return { applied: 0, skipped: 0 };
+        }
+        const baseSnapshot = safeParseSnapshot(lastSavedSnapshotRef.current);
+        const mergedPayload = { ...latestPayload };
+        const mergedData = cloneDataMap(latestPayload.data || {});
+        const baseData = baseSnapshot && typeof baseSnapshot.data === 'object' ? baseSnapshot.data : {};
+        const localData = localSnapshot && typeof localSnapshot.data === 'object' ? localSnapshot.data : {};
+        const diffs = baseSnapshot && localSnapshot ? computeDataDiff(baseSnapshot, localSnapshot) : [];
+        let applied = 0;
+        let skipped = 0;
+        diffs.forEach(diff=>{
+          const serverRow = mergedData[diff.day] || {};
+          const serverVal = serverRow[diff.emp] ?? '';
+          const expectVal = (baseData[diff.day] || {})[diff.emp] ?? '';
+          if(String(serverVal) === String(expectVal)){
+            if(!mergedData[diff.day]) mergedData[diff.day] = {};
+            mergedData[diff.day][diff.emp] = diff.value;
+            applied += 1;
+          } else {
+            skipped += 1;
+          }
+        });
+        mergedPayload.data = mergedData;
+        if(baseSnapshot && localSnapshot){
+          const baseNote = typeof baseSnapshot.note === 'string' ? baseSnapshot.note : '';
+          const serverNote = typeof latestPayload.note === 'string' ? latestPayload.note : '';
+          if(serverNote === baseNote && typeof localSnapshot.note === 'string' && localSnapshot.note !== baseNote){
+            mergedPayload.note = localSnapshot.note;
+            applied += 1;
+          }
+          const mergeableFields = ['adminDays','restPrefs','nightRules','nightWindows','nightOverride','rMin','rMax','pMin','pMax','mixMax','shiftColors','staffingAlerts','batchChecked','albumSelected','albumWhiteHour','albumMidHour','albumRangeStartMonth','albumRangeEndMonth','albumMaxDiff','albumAssignments','albumAutoNote','albumHistory','historyProfile','yearlyOptimize'];
+          mergeableFields.forEach(field=>{
+            const baseVal = baseSnapshot[field];
+            const serverVal = latestPayload[field];
+            const localVal = localSnapshot[field];
+            if(localVal !== undefined && !jsonEquals(localVal, baseVal) && jsonEquals(serverVal, baseVal)){
+              mergedPayload[field] = Array.isArray(localVal) ? localVal.slice() : (localVal && typeof localVal === 'object' ? JSON.parse(JSON.stringify(localVal)) : localVal);
+              applied += 1;
+            }
+          });
+        }
+        applyServerState({ ...mergedPayload, versionId: mergedPayload.versionId ?? mergedPayload.version_id ?? null });
+        skipSaveRef.current = false;
+        const latestVersion = mergedPayload.versionId ?? mergedPayload.version_id ?? null;
+        if(team && latestVersion){
+          lastLoadedVersionRef.current[team] = latestVersion;
+        }
+        if(team){
+          initialTeamSyncRef.current[team] = true;
+        }
+        if(applied > 0){
+          pendingAutoSaveRef.current = true;
+          lastSavedSnapshotRef.current = '';
+          setTimeout(()=> setAutoSaveTicker(tick=> tick + 1), 0);
+        } else {
+          pendingAutoSaveRef.current = false;
+        }
+        const msg = skipped > 0
+          ? `检测到其他账号已保存新版本，已同步最新数据，${skipped} 项本地改动因冲突未自动合并，请手动确认。`
+          : '检测到其他账号已保存新版本，已同步最新数据并保留本地改动。';
+        showToast(msg, skipped > 0 ? 'error' : 'info');
+        return { applied, skipped };
+      }
+
+      async function triggerAutoSave(reason, options = {}){
+        const { waitForResponse = false } = options;
+        if(autoSaveSendingRef.current) return false;
+        if(!pendingAutoSaveRef.current) return false;
+        const snapshot = snapshotRef.current;
+        if(!snapshot || !snapshotHasMeaningfulData(snapshot)) return false;
+        let payload;
+        try{
+          payload = buildSavePayload({
+            operatorOverride: '自动保存',
+            noteOverride: snapshot.note && snapshot.note.trim() ? snapshot.note : '自动保存'
+          }, snapshot);
+        }catch(e){
+          return false;
+        }
+        let serializedSnapshot = '';
+        try{ serializedSnapshot = JSON.stringify(snapshot); }catch(e){ serializedSnapshot = ''; }
+        autoSaveSendingRef.current = true;
+        if(waitForResponse){
+          try{
+            const res = await apiPost('/schedule/save', payload);
+            const returnedVersion = res && (res.version_id || res.versionId);
+            if(returnedVersion){
+              setVersionId(returnedVersion);
+              snapshotRef.current = { ...snapshotRef.current, versionId: returnedVersion };
+              if(team){
+                lastLoadedVersionRef.current[team] = returnedVersion;
+              }
+            }
+            if(serializedSnapshot){
+              lastSavedSnapshotRef.current = serializedSnapshot;
+            }
+            pendingAutoSaveRef.current = false;
+            autoSaveSendingRef.current = false;
+            return true;
+          }catch(error){
+            autoSaveSendingRef.current = false;
+            if(error?.payload && error.payload.code === 409){
+              await resolveSaveConflict(reason, snapshot);
+              return false;
+            }
+            console.warn('自动保存失败', reason, error);
+            pendingAutoSaveRef.current = true;
+            setAutoSaveTicker(tick=> tick + 1);
+            return false;
+          }
+        }
+        let body;
+        try{ body = JSON.stringify(payload); } catch(e){
+          autoSaveSendingRef.current = false;
+          pendingAutoSaveRef.current = true;
+          setAutoSaveTicker(tick=> tick + 1);
+          return false;
+        }
+        let sent = false;
+        if(typeof navigator !== 'undefined' && navigator.sendBeacon){
+          try{
+            const blob = new Blob([body], { type:'application/json' });
+            sent = navigator.sendBeacon(`${API_BASE}/schedule/save`, blob);
+          }catch(e){ sent = false; }
+        }
+        if(!sent){
+          try{
+            fetch(`${API_BASE}/schedule/save`, {
+              method:'POST',
+              headers:{ 'Content-Type':'application/json' },
+              body,
+              credentials:'include',
+              keepalive:true
+            }).catch(()=>{});
+          }catch(e){}
+        }
+        if(serializedSnapshot){
+          lastSavedSnapshotRef.current = serializedSnapshot;
+        } else {
+          lastSavedSnapshotRef.current = body;
+        }
+        pendingAutoSaveRef.current = false;
+        autoSaveSendingRef.current = false;
+        return true;
+      }
+
+      useEffect(()=>{
+        const handleBeforeUnload = ()=>{ try{ triggerAutoSave('beforeunload'); }catch(e){} };
+        const handlePageHide = ()=>{ try{ triggerAutoSave('pagehide'); }catch(e){} };
+        const handleVisibility = ()=>{
+          if(document.visibilityState === 'hidden'){
+            triggerAutoSave('visibilitychange');
+          }
+        };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        window.addEventListener('pagehide', handlePageHide);
+        document.addEventListener('visibilitychange', handleVisibility);
+        return ()=>{
+          window.removeEventListener('beforeunload', handleBeforeUnload);
+          window.removeEventListener('pagehide', handlePageHide);
+          document.removeEventListener('visibilitychange', handleVisibility);
+        };
+      }, []);
+
+      useEffect(()=>{
+        if(!autoSaveTicker) return;
+        if(!pendingAutoSaveRef.current) return;
+        let cancelled = false;
+        const timer = setTimeout(()=>{
+          if(cancelled) return;
+          triggerAutoSave('debounce', { waitForResponse:true });
+        }, 2500);
+        return ()=>{
+          cancelled = true;
+          clearTimeout(timer);
+        };
+      }, [autoSaveTicker, team]);
+
       async function loadFromServer(){
         try {
-          const params = new URLSearchParams();
-          if(team) params.set('team', team);
-          if(start) params.set('start', start);
-          if(end) params.set('end', end);
-          if(yearlyOptimize){
-            const yrMatch = (start || '').match(/^(\d{4})/);
-            if(yrMatch){
-              params.set('historyYearStart', `${yrMatch[1]}-01-01`);
-              params.set('yearOptimize', '1');
-            }
-          }
-          const query = params.toString();
-          const res = await apiGet(`/schedule?${query}`);
-          applyServerState({ ...res, versionId: res.version_id || res.versionId });
-          const latestVersion = res.version_id || res.versionId;
+          const payload = await fetchLatestSchedulePayload();
+          applyServerState(payload);
+          const latestVersion = payload.versionId;
           if(latestVersion){
             lastLoadedVersionRef.current[team] = latestVersion;
+          }
+          if(team){
+            initialTeamSyncRef.current[team] = true;
           }
         } catch(e){
           globalErr(e.message);
         }
       }
       async function saveToServer(){
+        const snapshotBeforeSave = snapshotRef.current;
         try{
-          const operator = (user && (user.display_name || user.username)) || '管理员';
-          const safeNightRules = normalizeNightRules(nightRules);
-          const payload = {
-            team,
-            viewStart: start,
-            viewEnd: end,
-            start,
-            end,
-            employees,
-            data,
-            baseVersionId: versionId,
-            note,
-            operator,
-            adminDays,
-            restPrefs: sanitizeRestPrefsMap(restPrefs),
-            nightRules: safeNightRules,
-            nightWindows,
-            nightOverride,
-            rMin,
-            rMax,
-            pMin,
-            pMax,
-            mixMax,
-            shiftColors,
-            staffingAlerts,
-            batchChecked,
-            albumSelected,
-            albumWhiteHour,
-            albumMidHour,
-            albumRangeStartMonth,
-            albumRangeEndMonth,
-            albumMaxDiff,
-            albumAssignments,
-            albumAutoNote,
-            albumHistory,
-            historyProfile,
-            yearlyOptimize
-          };
+          const payload = buildSavePayload();
           const res = await apiPost('/schedule/save', payload);
-          applyServerState({ ...payload, versionId: res.version_id || res.versionId || versionId });
-          if(res && (res.version_id || res.versionId)){
-            lastLoadedVersionRef.current[team] = res.version_id || res.versionId;
+          const returnedVersion = res && (res.version_id || res.versionId);
+          const nextVersion = returnedVersion || versionId || null;
+          applyServerState({ ...payload, versionId: nextVersion });
+          if(nextVersion){
+            lastLoadedVersionRef.current[team] = nextVersion;
+            if(team){
+              initialTeamSyncRef.current[team] = true;
+            }
           }
           showToast('已保存新版本', 'success');
           if(tab === 'history'){
             loadVersions();
           }
         } catch(e){
-          if(e.payload && e.payload.code===409){
-            if(confirm('服务器已有新版本，是否加载最新并覆盖？')) await loadFromServer();
+          if(e?.payload && e.payload.code===409){
+            await resolveSaveConflict('manual-save', snapshotBeforeSave, { manual:true });
             return;
           }
           globalErr(e.message);
@@ -1715,7 +1962,125 @@
         loadFromServer();
       }, [autoLoadKey, team, user]);
       async function doLogout(){ try{ await apiPost('/logout',{}); setUser(null);}catch{} }
-      function exportExcel(){ const url = `${API_BASE}/export/xlsx?team=${encodeURIComponent(team)}&start=${start}&end=${end}`; window.location.href=url; }
+      async function exportExcel(){
+        if(!team){ alert('请选择团队后再导出'); return; }
+        const start = (viewStart || '').slice(0,10);
+        const end = (viewEnd || '').slice(0,10);
+        if(!start || !end || start > end){ alert('请先设置有效的筛选时间范围'); return; }
+        const dates = enumerateDates(start, end);
+        if(!dates.length){ alert('筛选时间范围无效'); return; }
+        const exportEmployees = Array.isArray(employees) ? employees.slice() : [];
+        const payload = {
+          team,
+          start,
+          end,
+          employees: exportEmployees,
+          data: {}
+        };
+        for(const day of dates){
+          const row = data?.[day] || {};
+          const nextRow = {};
+          exportEmployees.forEach(emp=>{
+            if(row[emp] !== undefined && row[emp] !== null && row[emp] !== ''){
+              nextRow[emp] = row[emp];
+            }
+          });
+          payload.data[day] = nextRow;
+        }
+        try{
+          const res = await fetch(`${API_BASE}/export/xlsx`, {
+            method: 'POST',
+            headers: { 'Content-Type':'application/json' },
+            body: JSON.stringify(payload),
+            credentials: 'include'
+          });
+          if(!res.ok){
+            let msg = '导出失败';
+            try{ const err = await res.json(); if(err?.message) msg = err.message; }catch(e){}
+            throw new Error(msg);
+          }
+          const blob = await res.blob();
+          let filename = `排班_${start}_${end}.xlsx`;
+          const disposition = res.headers.get('Content-Disposition') || '';
+          const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+          if(match){
+            const encoded = match[1] || match[2];
+            if(encoded){
+              try{ filename = decodeURIComponent(encoded.replace(/"/g,'')); }catch(e){ filename = encoded.replace(/"/g,''); }
+            }
+          }
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+        }catch(e){
+          globalErr(e.message || '导出失败');
+        }
+      }
+      function downloadTemplate(){ window.location.href = `${API_BASE}/template/xlsx`; }
+      function openImportPicker(){ if(editingLocked) return; if(importInputRef.current){ importInputRef.current.click(); } }
+      async function importScheduleFile(file){
+        if(!file) return;
+        setImporting(true);
+        try{
+          const formData = new FormData();
+          formData.append('file', file);
+          const res = await fetch(`${API_BASE}/import/xlsx`, {
+            method: 'POST',
+            body: formData,
+            credentials: 'include'
+          });
+          if(!res.ok){
+            let msg = '导入失败';
+            try {
+              const err = await res.json();
+              if(err && err.message) msg = err.message;
+            } catch{}
+            throw new Error(msg);
+          }
+          const payload = await res.json();
+          const importedEmployees = Array.isArray(payload?.employees) ? payload.employees : [];
+          const importedData = (payload && typeof payload.data === 'object' && !Array.isArray(payload.data)) ? payload.data : {};
+          const start = typeof payload?.start === 'string' ? payload.start.slice(0,10) : '';
+          const end = typeof payload?.end === 'string' ? payload.end.slice(0,10) : '';
+          if(importedEmployees.length){
+            setEmployees(importedEmployees);
+          }
+          setData(importedData);
+          setVersionId(null);
+          setBatchChecked({});
+          setAlbumSelected({});
+          if(start){
+            setPlanStart(start);
+          }
+          if(end){
+            setPlanEnd(end);
+          }
+          if(start || end){
+            viewManuallyAdjustedRef.current = false;
+            if(start) setViewStart(start);
+            if(end) setViewEnd(end);
+          }
+          showToast(payload?.message || '导入成功，已覆盖当前排班', 'success');
+        } catch(e){
+          alert(e.message || '导入失败');
+        } finally {
+          setImporting(false);
+          if(importInputRef.current){ importInputRef.current.value = ''; }
+        }
+      }
+      const onImportInputChange = (e)=>{
+        const file = e.target?.files?.[0];
+        if(!file){
+          if(importInputRef.current){ importInputRef.current.value = ''; }
+          return;
+        }
+        importScheduleFile(file);
+      };
 
       useEffect(()=>{
         if(tab === 'history'){
@@ -1723,24 +2088,194 @@
         }
       }, [tab, team]);
 
-      const dateList = useMemo(()=> enumerateDates(start, end), [start,end]);
+      const dateList = useMemo(()=>{
+        const hasView = viewStart && viewEnd;
+        if(hasView){
+          const s = viewStart <= viewEnd ? viewStart : viewEnd;
+          const e = viewStart <= viewEnd ? viewEnd : viewStart;
+          return enumerateDates(s, e);
+        }
+        return enumerateDates(planStart, planEnd);
+      }, [viewStart, viewEnd, planStart, planEnd]);
+      const allDateKeys = useMemo(()=> Object.keys(data||{}).sort(), [data]);
+      const planDateList = useMemo(()=>{
+        const valid = (val)=> typeof val === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(val);
+        const s = valid(planStart) ? planStart : null;
+        const e = valid(planEnd) ? planEnd : null;
+        if(s && e){
+          const start = s <= e ? s : e;
+          const end = s <= e ? e : s;
+          return enumerateDates(start, end);
+        }
+        return allDateKeys.filter(day=> (!s || day >= s) && (!e || day <= e));
+      }, [planStart, planEnd, allDateKeys]);
       const activeCellRef = useRef(null);
-      function setCellByIndex(dIndex, eIndex, value){ const d = dateList[dIndex]; const emp = employees[eIndex]; if(!d||!emp) return; setData(prev=>{ const next = { ...prev }; const row = { ...(next[d]||{}) }; row[emp] = value; next[d] = row; return next; }); }
-      function onFocusCell(dIndex, eIndex){ activeCellRef.current = { dIndex, eIndex }; }
-      function moveActive(dx, dy){ const cur = activeCellRef.current || { dIndex:0, eIndex:0 }; const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateList.length-1)); const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, employees.length-1)); activeCellRef.current = { dIndex: ni, eIndex: nj }; const id = `cell-${ni}-${nj}`; const el = document.getElementById(id); if(el) el.focus(); }
-      function openPickerAt(di, ei, anchorEl){ if(editingLocked) return; const el = anchorEl || document.getElementById(`cell-${di}-${ei}`); if(!el) return; const rect = el.getBoundingClientRect(); setPicker({ open:true, di, ei, x: rect.left + window.scrollX, y: rect.bottom + window.scrollY + 4 }); }
-      function onKeyDownCell(e, di, ei){ if(e.isComposing) return; if(e.altKey && (e.key==='ArrowDown' || e.key==='Enter')){ e.preventDefault(); openPickerAt(di, ei, e.currentTarget); return; } if(e.key==='Enter'){ e.preventDefault(); moveActive(1,0); } else if(e.key==='ArrowRight'){ e.preventDefault(); moveActive(1,0); } else if(e.key==='ArrowLeft'){ e.preventDefault(); moveActive(-1,0); } else if(e.key==='ArrowDown'){ e.preventDefault(); moveActive(0,1); } else if(e.key==='ArrowUp'){ e.preventDefault(); moveActive(0,-1); } }
+      const setCellByIndex = useCallback((dIndex, eIndex, value)=>{
+        const d = dateList[dIndex];
+        const emp = employees[eIndex];
+        if(!d || !emp) return;
+        setData(prev=>{
+          const next = { ...prev };
+          const row = { ...(next[d]||{}) };
+          row[emp] = value;
+          next[d] = row;
+          return next;
+        });
+      }, [dateList, employees]);
+      const onFocusCell = useCallback((dIndex, eIndex)=>{ activeCellRef.current = { dIndex, eIndex }; }, []);
+      const dateCount = dateList.length;
+      const empCount = employees.length;
+      const moveActive = useCallback((dx, dy)=>{
+        const cur = activeCellRef.current || { dIndex:0, eIndex:0 };
+        const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateCount-1));
+        const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, empCount-1));
+        activeCellRef.current = { dIndex: ni, eIndex: nj };
+        const id = `cell-${ni}-${nj}`;
+        const el = document.getElementById(id);
+        if(el) el.focus();
+      }, [dateCount, empCount]);
+      const openPickerAt = useCallback((di, ei, anchorEl)=>{
+        if(editingLocked) return;
+        const el = anchorEl || document.getElementById(`cell-${di}-${ei}`);
+        if(!el) return;
+        const rect = el.getBoundingClientRect();
+        const margin = 8;
+        const pickerWidth = 176;
+        const pickerHeight = 236;
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+        let left = rect.left;
+        let top = rect.bottom + 6;
+        if(left + pickerWidth > viewportWidth - margin){
+          left = Math.max(margin, viewportWidth - pickerWidth - margin);
+        } else {
+          left = Math.max(margin, left);
+        }
+        let placement = 'down';
+        if(top + pickerHeight > viewportHeight - margin){
+          const above = rect.top - pickerHeight - 6;
+          if(above >= margin){
+            top = above;
+            placement = 'up';
+          } else {
+            top = Math.max(margin, viewportHeight - pickerHeight - margin);
+          }
+        }
+        setPicker({ open:true, di, ei, x:left, y:top, placement });
+      }, [editingLocked]);
+      const onKeyDownCell = useCallback((e, di, ei)=>{
+        if(e.isComposing) return;
+        if(e.altKey && (e.key==='ArrowDown' || e.key==='Enter')){
+          e.preventDefault();
+          openPickerAt(di, ei, e.currentTarget);
+          return;
+        }
+        if(e.key==='Enter'){
+          e.preventDefault();
+          moveActive(1,0);
+        } else if(e.key==='ArrowRight'){
+          e.preventDefault();
+          moveActive(1,0);
+        } else if(e.key==='ArrowLeft'){
+          e.preventDefault();
+          moveActive(-1,0);
+        } else if(e.key==='ArrowDown'){
+          e.preventDefault();
+          moveActive(0,1);
+        } else if(e.key==='ArrowUp'){
+          e.preventDefault();
+          moveActive(0,-1);
+        }
+      }, [moveActive, openPickerAt]);
+
+      const ScheduleRow = React.memo(function ScheduleRow({
+        day,
+        di,
+        employeesList,
+        rowData,
+        issue,
+        staffingAlerts,
+        editingLocked,
+        shiftColors,
+        onFocusCell,
+        onKeyDownCell,
+        openPickerAt,
+        setCellByIndex
+      }){
+        const dataRow = rowData || EMPTY_ROW;
+        const stats = useMemo(()=>{
+          let total = 0; let white = 0; let mid1 = 0; let mid2 = 0; let night = 0;
+          for(const emp of employeesList){
+            const v = dataRow[emp];
+            if(!v || v==='休') continue;
+            total++;
+            if(v==='白') white++;
+            else if(v==='中1') mid1++;
+            else if(v==='中2') mid2++;
+            else if(v==='夜') night++;
+          }
+          return { total, white, mid1, mid2, night };
+        }, [dataRow, employeesList]);
+        const w = dow(day);
+        const weekend = w===0 || w===6;
+        const weekLabel = WN[w];
+        return (
+          <tr className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
+            <td className="py-1.5 px-3 font-medium text-gray-800 left-sticky" style={{minWidth:'8.5rem'}}>
+              <div className="flex items-center gap-2"><span>{day}</span></div>
+              <div className="text-xs text-gray-500 flex flex-wrap items-center gap-1">
+                <span style={styleForStaffing(stats.total, staffingAlerts.total)}>在岗 {stats.total}</span>
+                <span>（</span>
+                <span style={styleForStaffing(stats.white, staffingAlerts.white)}>白 {stats.white}</span>
+                <span>/</span>
+                <span style={styleForStaffing(stats.mid1, staffingAlerts.mid1)}>中1 {stats.mid1}</span>
+                <span>/</span>
+                <span>中2 {stats.mid2}</span>
+                <span>/</span>
+                <span>夜 {stats.night}</span>
+                <span>）</span>
+              </div>
+            </td>
+            <td className="py-1.5 px-3 text-gray-500 left-sticky-2" style={{minWidth:'6.5rem'}}>周{weekLabel}</td>
+            <td className="py-1.5 px-3 left-sticky-3" style={{minWidth:'9rem'}}>
+              {issue? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
+            </td>
+            {employeesList.map((emp, ei)=>{
+              const value = dataRow[emp] || '';
+              const bg = shiftColors[value] || undefined;
+              return (
+                <td key={emp} className="py-1.5 px-3">
+                  <div className="cell-wrap">
+                    <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
+                      style={{ backgroundColor: bg }} value={value}
+                      disabled={editingLocked}
+                      title={editingLocked? '执行中：只读' : ''}
+                      onFocus={()=> onFocusCell(di, ei)}
+                      onKeyDown={(ev)=> onKeyDownCell(ev, di, ei)}
+                      onCompositionStart={(ev)=>{ ev.target.isComposing = true; }}
+                      onCompositionEnd={(ev)=>{ ev.target.isComposing = false; setCellByIndex(di, ei, ev.currentTarget.value); }}
+                      onChange={ev=> setCellByIndex(di, ei, ev.target.value)}
+                      onDoubleClick={(ev)=>{ if(editingLocked) return; openPickerAt(di, ei, ev.currentTarget); }} placeholder="白/中1/中2/夜/休 或留空" />
+                    <button className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title="选择班次"
+                      onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
+                      <span className="sr-only">打开班次选择器</span>
+                    </button>
+                  </div>
+                </td>
+              );
+            })}
+          </tr>
+        );
+      });
 
       function clearRange(mode='empty'){
         setData(prev=>{ const next={...prev}; for(const d of dateList){ const r={...(next[d]||{})}; for(const e of employees){ r[e] = (mode==='rest')? '休' : ''; } next[d]=r; } return next; });
       }
 
-      const dailyStats = useMemo(()=>{ const m={}; for(const d of dateList){ const row=data[d]||{}; const stat={总:0, 白:0, 中1:0, 中2:0, 夜:0}; for(const e of employees){ const v=row[e]; if(!v || v==='休') continue; stat['总']++; if(v==='白') stat['白']++; else if(v==='中1') stat['中1']++; else if(v==='中2') stat['中2']++; else if(v==='夜') stat['夜']++; } m[d]=stat; } return m; }, [data, dateList, employees]);
-
       const nightIssues = useMemo(()=>{ const issues={}; function inAnyWin(day){ for(const w of nightWindows){ if(!w.s||!w.e) continue; if(day>=w.s && day<=w.e) return true; } return false; } for(const d of dateList){ if(!inAnyWin(d)) continue; const row=data[d]||{}; const vals=Object.values(row); const hasN = vals.includes('夜'); const hasM2 = vals.includes('中2'); let msg=''; if(!hasN && !hasM2) msg='缺夜&中2'; else if(!hasN) msg='缺夜'; else if(!hasM2) msg='缺中2'; if(msg) issues[d]=msg; } return issues; }, [nightWindows, data, dateList]);
 
       // —— 新增：全局单个浮动班次选择器 ——
-      const [picker, setPicker] = useState({ open:false, di:null, ei:null, x:0, y:0 });
+      const [picker, setPicker] = useState({ open:false, di:null, ei:null, x:0, y:0, placement:'down' });
       const pickerRef = useRef(null);
       useEffect(()=>{
         function onDocDown(ev){ if(!picker.open) return; if(pickerRef.current && !pickerRef.current.contains(ev.target)) setPicker(p=>({...p, open:false})); }
@@ -1748,7 +2283,104 @@
         return ()=> document.removeEventListener('mousedown', onDocDown);
       }, [picker.open]);
 
-      const gridEmpCounts = useMemo(()=> countByEmpInRange(employees, data, start, end), [employees, data, start, end]);
+      const pickerContext = useMemo(()=>{
+        if(!picker.open) return null;
+        const { di, ei } = picker;
+        const day = dateList[di];
+        const emp = employees[ei];
+        if(!day || !emp) return null;
+        const parse = (ymd)=> new Date(`${ymd}T00:00:00`);
+        const timeline = planDateList.length ? planDateList : allDateKeys;
+        const computeGap = (targetShift)=>{
+          const search = (source)=>{
+            if(!source.length) return null;
+            const anchorIdx = source.indexOf(day);
+            const walk = (startIdx, skipSameDay)=>{
+              for(let idx = startIdx; idx >= 0; idx--){
+                const prevDay = source[idx];
+                if(!prevDay) continue;
+                if(skipSameDay && prevDay >= day) continue;
+                const val = getVal(data, prevDay, emp);
+                if(val === targetShift){
+                  const diff = Math.round((parse(day) - parse(prevDay)) / 86400000);
+                  return Number.isFinite(diff) ? diff : null;
+                }
+              }
+              return null;
+            };
+            if(anchorIdx !== -1){
+              return walk(anchorIdx - 1, false);
+            }
+            return walk(source.length - 1, true);
+          };
+          const primary = search(timeline);
+          if(primary !== null) return primary;
+          if(planDateList.length){
+            const fallback = search(allDateKeys);
+            if(fallback !== null) return fallback;
+          }
+          return null;
+        };
+        return {
+          day,
+          emp,
+          nightGap: computeGap('夜'),
+          mid2Gap: computeGap('中2')
+        };
+        }, [picker, dateList, employees, data, planDateList, allDateKeys]);
+
+      const gridEmpCounts = useMemo(()=>{
+        const usingPlan = planDateList.length > 0;
+        const primaryDates = usingPlan ? planDateList : allDateKeys;
+        const primary = countByEmpOnDates(employees, data, primaryDates);
+        if(primary.hasWork || !usingPlan){
+          return primary.counter;
+        }
+        const fallback = countByEmpOnDates(employees, data, allDateKeys);
+        return fallback.hasWork ? fallback.counter : primary.counter;
+      }, [employees, data, planDateList, allDateKeys]);
+
+      const viewYear = useMemo(()=>{
+        const base = viewStart || planStart || dateList[0];
+        if(!base) return null;
+        const d = new Date(`${base}T00:00:00`);
+        if(Number.isNaN(d.getTime())) return null;
+        return d.getFullYear();
+      }, [viewStart, planStart, dateList]);
+
+      const empYearStats = useMemo(()=>{
+        if(!viewYear) return {};
+        const start = fmt(new Date(viewYear, 0, 1));
+        const end = fmt(new Date(viewYear, 11, 31));
+        const empSet = new Set(employees);
+        const monthMap = {};
+        Object.entries(data || {}).forEach(([day, row])=>{
+          if(!row) return;
+          if(day < start || day > end) return;
+          const monthKey = day.slice(0,7);
+          Object.entries(row).forEach(([emp, val])=>{
+            if(!empSet.has(emp)) return;
+            if(!isWork(val)) return;
+            if(!monthMap[emp]) monthMap[emp] = new Set();
+            monthMap[emp].add(monthKey);
+          });
+        });
+        const result = {};
+        employees.forEach(emp=>{
+          const stats = statsForEmployee(data, emp, start, end);
+          const monthCount = monthMap[emp]?.size || 0;
+          const divisor = monthCount || 12;
+          result[emp] = {
+            year: viewYear,
+            night: stats.night,
+            mid2: stats.mid2,
+            avgNight: divisor ? stats.night / divisor : 0,
+            avgMid2: divisor ? stats.mid2 / divisor : 0,
+            months: monthCount
+          };
+        });
+        return result;
+      }, [viewYear, employees, data]);
 
       const ViewGrid = (
         <Section title="排班表格" right={<span className="text-sm text-gray-500">提示：点击单元格→直接输入或从 Excel 粘贴；支持 IME 连续输入 {editingLocked && <span className='inline-flex items-center gap-1 text-rose-600 ml-2'><Icon name='lock'/>执行中：只读</span>}</span>}>
@@ -1766,11 +2398,25 @@
                       {employees.map(e=> {
                         const diff = (gridEmpCounts[e]?.总||0) - Number(adminDays||0);
                         const diffCls = diff===0? 'bg-gray-100 text-gray-700' : (diff>0? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700');
+                        const tooltip = empYearStats[e];
                         return (
                           <th key={e} className="sticky py-2 px-3 text-left">
-                            <div className="flex items-center gap-2">
-                              <span>{e}</span>
+                            <div className="group relative inline-flex items-center gap-2">
+                              <span className="cursor-help font-medium text-gray-700">{e}</span>
                               <span className={`badge ${diffCls}`} title="差值=实际总天数-行政班应上天数">{diff>0?`+${diff}`:diff}</span>
+                              {tooltip && (
+                                <div className="pointer-events-none absolute top-full right-0 z-30 mt-2 hidden min-w-[220px] max-w-[280px] rounded-2xl bg-gray-900/95 p-3 text-left text-xs text-white shadow-2xl group-hover:block" style={{ maxWidth: 'min(280px, calc(100vw - 48px))' }}>
+                                  <div className="text-sm font-semibold text-white/90">{tooltip.year} 年排班</div>
+                                  <div className="mt-1 space-y-1">
+                                    <div className="flex items-center justify-between"><span>夜班总计</span><span>{tooltip.night} 天</span></div>
+                                    <div className="flex items-center justify-between"><span>中2 总计</span><span>{tooltip.mid2} 天</span></div>
+                                    <div className="h-px bg-white/10"></div>
+                                    <div className="flex items-center justify-between"><span>夜班月均</span><span>{tooltip.avgNight.toFixed(1)} 天</span></div>
+                                    <div className="flex items-center justify-between"><span>中2 月均</span><span>{tooltip.avgMid2.toFixed(1)} 天</span></div>
+                                  </div>
+                                  <div className="mt-1 text-[10px] text-white/50">{tooltip.months>0 ? `基于 ${tooltip.months} 个月排班记录统计` : '暂无该年度排班记录'}</div>
+                                </div>
+                              )}
                             </div>
                           </th>
                         );
@@ -1778,56 +2424,23 @@
                     </tr>
                   </thead>
                   <tbody>
-                    {dateList.map((d,di)=> {
-                      const w = dow(d); const weekend=(w===0||w===6);
-                      const row=data[d]||{}; const issue = nightIssues[d]||'';
-                      const stat = dailyStats[d]||{总:0,白:0,中1:0,中2:0,夜:0};
-                      return (
-                        <tr key={d} className={"border-t hover:bg-indigo-50/30 "+(weekend? 'bg-gray-50' : '')}>
-                          <td className={`py-1.5 px-3 font-medium text-gray-800 left-sticky`} style={{minWidth:'8.5rem'}}>
-                            <div className="flex items-center gap-2"><span>{d}</span></div>
-                            <div className="text-xs text-gray-500 flex flex-wrap items-center gap-1">
-                              <span style={styleForStaffing(stat['总'], staffingAlerts.total)}>在岗 {stat['总']}</span>
-                              <span>（</span>
-                              <span style={styleForStaffing(stat['白'], staffingAlerts.white)}>白 {stat['白']}</span>
-                              <span>/</span>
-                              <span style={styleForStaffing(stat['中1'], staffingAlerts.mid1)}>中1 {stat['中1']}</span>
-                              <span>/</span>
-                              <span>中2 {stat['中2']}</span>
-                              <span>/</span>
-                              <span>夜 {stat['夜']}</span>
-                              <span>）</span>
-                            </div>
-                          </td>
-                          <td className="py-1.5 px-3 text-gray-500 left-sticky-2" style={{minWidth:'6.5rem'}}>周{WN[w]}</td>
-                          <td className="py-1.5 px-3 left-sticky-3" style={{minWidth:'9rem'}}>
-                            {issue? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
-                          </td>
-                          {employees.map((e,ei)=> {
-                            const v = (data[d]&&data[d][e])||'';
-                            const bg = shiftColors[v] || undefined;
-                            return (
-                              <td key={e} className="py-1.5 px-3">
-                                <div className="cell-wrap">
-                                  <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
-                                    style={{ backgroundColor: bg }} value={v}
-                                    disabled={editingLocked}
-                                    title={editingLocked? '执行中：只读' : ''}
-                                    onFocus={()=>onFocusCell(di,ei)} onKeyDown={(ev)=> onKeyDownCell(ev, di, ei)}
-                                    onCompositionStart={(ev)=>{ ev.target.isComposing = true; }}
-                                    onCompositionEnd={(ev)=>{ ev.target.isComposing = false; setCellByIndex(di, ei, ev.currentTarget.value); }}
-                                    onChange={ev=> setCellByIndex(di, ei, ev.target.value)} onDoubleClick={(ev)=>{ if(editingLocked) return; openPickerAt(di, ei, ev.currentTarget); }} placeholder="白/中1/中2/夜/休 或留空" />
-                                  <button className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title="选择班次"
-                                    onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
-                                    <span className="sr-only">打开班次选择器</span>
-                                  </button>
-                                </div>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })}
+                    {dateList.map((d,di)=> (
+                      <ScheduleRow
+                        key={d}
+                        day={d}
+                        di={di}
+                        employeesList={employees}
+                        rowData={data[d] || EMPTY_ROW}
+                        issue={nightIssues[d] || ''}
+                        staffingAlerts={staffingAlerts}
+                        editingLocked={editingLocked}
+                        shiftColors={shiftColors}
+                        onFocusCell={onFocusCell}
+                        onKeyDownCell={onKeyDownCell}
+                        openPickerAt={openPickerAt}
+                        setCellByIndex={setCellByIndex}
+                      />
+                    ))}
                   </tbody>
                 </table>
                 <datalist id="shift-options">
@@ -1857,7 +2470,7 @@
                 <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} onClick={()=> withStay(()=> setBatchChecked(prev=>{ const next={...prev}; filtered.forEach(n=> { next[n]=false; }); return next; }))}>清空</button>
               </div>
             </div>
-            <div ref={listRef} className="max-h-64 overflow-auto divide-y">
+            <div ref={listRef} className="divide-y">
               {filtered.map(name=> (
                 <label key={name} className="flex items-center gap-2 py-1">
                   <input type="checkbox" disabled={editingLocked} checked={!!batchChecked[name]} onChange={()=> withStay(()=> setBatchChecked(p=>({ ...p, [name]: !p[name] })))} />
@@ -1889,7 +2502,7 @@
                 <button className={`px-2 py-1 rounded border text-xs ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked || filtered.length===0} onClick={()=> withStay(()=> setAlbumSelected(prev=>{ const next={...prev}; filtered.forEach(n=>{ next[n] = false; }); return next; }))}>清空</button>
               </div>
             </div>
-            <div ref={listRef} className="max-h-64 overflow-auto divide-y">
+              <div ref={listRef} className="divide-y">
               {filtered.map(name=> (
                 <label key={name} className="flex items-center gap-2 py-1 text-sm">
                   <input type="checkbox" checked={!!albumSelected[name]} disabled={editingLocked} onChange={()=> withStay(()=> setAlbumSelected(prev=> ({ ...prev, [name]: !prev[name] })))} />
@@ -1913,46 +2526,63 @@
           const prioritizedTargets = sortedByHistory(targets, historyProfile);
 
           setStage('阶段 1/6：拉齐白班（5白+2休）', 10, 100);
-          let cur = buildWhiteFiveTwo({ employees: prioritizedTargets, data, start, end, restPrefs });
-          setData(cur); await new Promise(r=>setTimeout(r, 20));
+          let cur = buildWhiteFiveTwo({ employees: prioritizedTargets, data, start: planStart, end: planEnd, restPrefs });
+          setData(cur); await waitForFrame();
 
           setStage('阶段 2/6：按周期交替错开放中班', 30, 100);
-          cur = applyAlternateByCycle({ employees: prioritizedTargets, data: cur, start, end }, mixMax);
-          setData(cur); await new Promise(r=>setTimeout(r, 20));
+          cur = applyAlternateByCycle({ employees: prioritizedTargets, data: cur, start: planStart, end: planEnd }, mixMax);
+          setData(cur); await waitForFrame();
 
           setStage('阶段 3/6：按天比例收敛', 55, 100);
-          cur = clampDailyByRange({ employees: prioritizedTargets, data: cur, start, end, rMin, rMax, maxRounds: 300, mixMaxRatio: mixMax });
-          setData(cur); await new Promise(r=>setTimeout(r, 20));
+          cur = clampDailyByRange({ employees: prioritizedTargets, data: cur, start: planStart, end: planEnd, rMin, rMax, maxRounds: 300, mixMaxRatio: mixMax });
+          setData(cur); await waitForFrame();
 
           setStage('阶段 4/6：个人比例收敛', 78, 100);
           for(let sweep=0; sweep<8; sweep++){
-            cur = clampDailyByRange({ employees: prioritizedTargets, data: cur, start, end, rMin, rMax, maxRounds: 220, mixMaxRatio: mixMax });
-            cur = clampPersonByRange({ employees: prioritizedTargets, data: cur, start, end, pMin, pMax, maxRounds: 260, mixMaxRatio: mixMax });
+            cur = clampDailyByRange({ employees: prioritizedTargets, data: cur, start: planStart, end: planEnd, rMin, rMax, maxRounds: 220, mixMaxRatio: mixMax });
+            cur = clampPersonByRange({ employees: prioritizedTargets, data: cur, start: planStart, end: planEnd, pMin, pMax, maxRounds: 260, mixMaxRatio: mixMax });
             pushLog(`循环微调：第 ${sweep+1} 轮`);
+            if((sweep+1) % 2 === 0) await waitForFrame();
           }
-          setData(cur); await new Promise(r=>setTimeout(r, 20));
+          setData(cur); await waitForFrame();
 
           setStage('阶段 5/6：参考历史与行政天数调整', 92, 100);
-          cur = adjustWithHistory({ data: cur, employees: prioritizedTargets, start, end, adminDays, historyProfile, mixMaxRatio: mixMax, yearlyOptimize });
-          setData(cur); await new Promise(r=>setTimeout(r, 20));
+          cur = adjustWithHistory({ data: cur, employees: prioritizedTargets, start: planStart, end: planEnd, adminDays, historyProfile, mixMaxRatio: mixMax, yearlyOptimize });
+          setData(cur); await waitForFrame();
 
           setStage('阶段 6/6：校验并微调', 98, 100);
-          cur = repairNoMidToWhite({ data: cur, employees: prioritizedTargets, start, end });
+          cur = repairNoMidToWhite({ data: cur, employees: prioritizedTargets, start: planStart, end: planEnd });
           setData(cur);
 
           endStage();
         }
 
         return (
-          <div className="bg-white rounded-xl border p-3 space-y-3">
+          <div className="rounded-2xl border border-indigo-100/60 bg-white/80 backdrop-blur-sm p-4 space-y-3 shadow-sm transition-transform duration-300 hover:-translate-y-1 hover:shadow-xl">
+            <div className="space-y-2">
+              <div className="font-medium text-gray-700">自动排班日期范围</div>
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <label className="inline-flex items-center gap-2">开始
+                  <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planStart}
+                    onChange={e=> setPlanStart(e.target.value)} disabled={editingLocked} />
+                </label>
+                <span className="text-gray-400">—</span>
+                <label className="inline-flex items-center gap-2">结束
+                  <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planEnd}
+                    onChange={e=> setPlanEnd(e.target.value)} disabled={editingLocked} />
+                </label>
+                <span className="text-xs text-gray-400">顶部日期仅用于筛选视图</span>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
               <div className="space-y-2">
                 <div className="font-medium text-gray-700">每日比例（中1:白）</div>
                 <div className="flex items-center gap-2">
                   <span>1 :</span>
-                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={rMin} onChange={(e)=> setRMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
+                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={rMin} onChange={(e)=> setRMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                   <span>~</span>
-                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={rMax} onChange={(e)=> setRMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
+                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={rMax} onChange={(e)=> setRMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                   <span className="text-gray-400">（示例：1:0.4~0.6）</span>
                 </div>
               </div>
@@ -1960,9 +2590,9 @@
                 <div className="font-medium text-gray-700">个人比例（中1:白）</div>
                 <div className="flex items-center gap-2">
                   <span>1 :</span>
-                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={pMin} onChange={(e)=> setPMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
+                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={pMin} onChange={(e)=> setPMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                   <span>~</span>
-                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={pMax} onChange={(e)=> setPMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
+                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={pMax} onChange={(e)=> setPMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                   <span className="text-gray-400">（示例：1:0.4~0.6）</span>
                 </div>
               </div>
@@ -1971,13 +2601,13 @@
               <div className="font-medium text-gray-700">混合周期上限（比例）</div>
               <div className="flex items-center gap-2 text-sm">
                 <span>混合周期 ≤ 总周期 ×</span>
-                <input type="number" step="0.05" min="0" max="1" className="w-24 border rounded px-2 py-1" value={mixMax} onChange={(e)=> setMixMax(Math.max(0, Math.min(1, parseFloat(e.target.value||'0'))))} />
+                <input type="number" step="0.05" min="0" max="1" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={mixMax} onChange={(e)=> setMixMax(Math.max(0, Math.min(1, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
                 <span className="text-gray-400">（例如：0.5 表示有白且有中的周期不超过一半）</span>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
-              <PillBtn color="indigo" onClick={runMainRule} disabled={prog.running}>开始自动排班</PillBtn>
+              <PillBtn color="indigo" onClick={runMainRule} disabled={editingLocked} title={editingLocked ? '当前账号仅支持查看，无法执行自动排班' : ''}>开始自动排班</PillBtn>
             </div>
 
             <div className="text-xs text-gray-500">规则说明：① 全程禁止生成“中1→白”相邻；② 严格遵守最多 6 天连续上班；③ 混合周期（白+中1 同在一周期）不超过设定比例；④ 夜/中2 不参与本算法但保留；⑤ 多轮“按天→按人”收敛，优先确保你的目标约束而非速度。</div>
@@ -1987,27 +2617,27 @@
 
       function NightPanel(){
         return (
-          <div className="bg-white rounded-xl border p-3">
+          <div className="rounded-2xl border border-slate-200/70 bg-white/85 backdrop-blur-sm p-4 shadow-sm transition-transform duration-300 hover:-translate-y-1 hover:shadow-xl">
             <h4 className="font-medium mb-2">夜班窗口（每天尽量有 夜 + 中2）</h4>
             <div className="space-y-2">
               {nightWindows.map((w,i)=> (
                 <div key={i} className="flex flex-wrap items-end gap-2">
-                  <label className="text-sm">开始 <input type="date" value={w.s} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], s:e.target.value}; return a; })} className="border rounded px-2 py-1 ml-1"/></label>
-                  <label className="text-sm">结束 <input type="date" value={w.e} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], e:e.target.value}; return a; })} className="border rounded px-2 py-1 ml-1"/></label>
-                  <button className="px-2 py-1 border rounded" onClick={()=> setNightWindows(arr=> arr.filter((_,idx)=> idx!==i))}>删除</button>
+                  <label className="text-sm">开始 <input type="date" value={w.s} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], s:e.target.value}; return a; })} className={`border rounded px-2 py-1 ml-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} disabled={editingLocked}/></label>
+                  <label className="text-sm">结束 <input type="date" value={w.e} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], e:e.target.value}; return a; })} className={`border rounded px-2 py-1 ml-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} disabled={editingLocked}/></label>
+                  <button className={`px-2 py-1 border rounded ${editingLocked?'opacity-50 cursor-not-allowed':''}`} onClick={()=> setNightWindows(arr=> arr.filter((_,idx)=> idx!==i))} disabled={editingLocked}>删除</button>
                 </div>
               ))}
-              <button className="px-3 py-1.5 border rounded" onClick={()=> setNightWindows(a=> [...a, {s:start,e:end}])}>新增一段</button>
+              <button className={`px-3 py-1.5 border rounded ${editingLocked?'opacity-50 cursor-not-allowed':''}`} onClick={()=> setNightWindows(a=> [...a, {s:planStart,e:planEnd}])} disabled={editingLocked}>新增一段</button>
             </div>
 
             <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightOverride} onChange={e=> setNightOverride(e.target.checked)} /> 应用夜/中2时允许覆盖现有班次</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.prioritizeInterval} onChange={e=> setNightRules(r=>({...r, prioritizeInterval:e.target.checked}))}/> 夜班按间隔优先分配</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterNight} onChange={e=> setNightRules(r=>({...r, restAfterNight:e.target.checked}))}/> 夜班后休息 2 天</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.enforceRestCap} onChange={e=> setNightRules(r=>({...r, enforceRestCap:e.target.checked}))}/> 夜后休息不超过 2 天</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterMid2} onChange={e=> setNightRules(r=>({...r, restAfterMid2:e.target.checked}))}/> 中2 后休息 2 天</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowDoubleMid2} onChange={e=> setNightRules(r=>({...r, allowDoubleMid2:e.target.checked}))}/> 允许连续 2 个中2</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowNightDay4} onChange={e=> setNightRules(r=>({...r, allowNightDay4:e.target.checked}))}/> 支持周期第 4 天排夜班</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightOverride} onChange={e=> setNightOverride(e.target.checked)} disabled={editingLocked} /> 应用夜/中2时允许覆盖现有班次</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.prioritizeInterval} onChange={e=> setNightRules(r=>({...r, prioritizeInterval:e.target.checked}))} disabled={editingLocked}/> 夜班按间隔优先分配</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterNight} onChange={e=> setNightRules(r=>({...r, restAfterNight:e.target.checked}))} disabled={editingLocked}/> 夜班后休息 2 天</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.enforceRestCap} onChange={e=> setNightRules(r=>({...r, enforceRestCap:e.target.checked}))} disabled={editingLocked}/> 夜后休息不超过 2 天</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterMid2} onChange={e=> setNightRules(r=>({...r, restAfterMid2:e.target.checked}))} disabled={editingLocked}/> 中2 后休息 2 天</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowDoubleMid2} onChange={e=> setNightRules(r=>({...r, allowDoubleMid2:e.target.checked}))} disabled={editingLocked}/> 允许连续 2 个中2</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowNightDay4} onChange={e=> setNightRules(r=>({...r, allowNightDay4:e.target.checked}))} disabled={editingLocked}/> 支持周期第 4 天排夜班</label>
             </div>
 
             <div className="flex flex-wrap items-center gap-3 mt-3 text-sm">
@@ -2016,7 +2646,7 @@
                 let newD={...data};
                 for(const w of nightWindows){ if(!w.s||!w.e) continue; newD = autoAssignNightAndM2({ employees: checkedList, data:newD, start:w.s, end:w.e, override: nightOverride, nightRules, restPrefs }); }
                 setData(newD);
-              }}>AI 一键分配 夜/中2（按窗口，多段）</PillBtn>
+              }} disabled={editingLocked} title={editingLocked ? '当前账号仅支持查看，无法执行自动排班' : ''}>AI 一键分配 夜/中2（按窗口，多段）</PillBtn>
               <span className="text-xs text-gray-500">规则：夜后两天必须休；夜后两天禁止该员工中2；中2后一天强制休。</span>
             </div>
           </div>
@@ -2039,11 +2669,11 @@
         let s = spanStart.start;
         let e = spanEnd.end;
         if(s > e){ const tmp = s; s = spanEnd.start; e = spanStart.end; }
-        const clipStart = s < start ? start : s;
-        const clipEnd = e > end ? end : e;
+        const clipStart = s < planStart ? planStart : s;
+        const clipEnd = e > planEnd ? planEnd : e;
         if(clipStart > clipEnd) return null;
         return { start: clipStart, end: clipEnd };
-      }, [albumRangeStartMonth, albumRangeEndMonth, start, end]);
+      }, [albumRangeStartMonth, albumRangeEndMonth, planStart, planEnd]);
       const albumDates = useMemo(()=> albumRange? enumerateDates(albumRange.start, albumRange.end) : [], [albumRange]);
 
       useEffect(()=>{
@@ -2210,57 +2840,25 @@
       };
 
       const autoAssignAlbum = ()=>{
-        if(editingLocked){ alert('执行中：请稍后再试'); return; }
+        if(editingLocked){ alert('当前账号仅支持查看，无法执行自动排班'); return; }
         if(albumCheckedList.length===0){ alert('请先在左侧勾选参与专辑审核的人员'); return; }
         if(albumDates.length===0){ alert('请先设置有效的月份范围，并确保与当前排班范围有交集'); return; }
         const diffLimitRaw = Number(albumMaxDiff);
         const diffLimit = Number.isFinite(diffLimitRaw) ? Math.max(0, diffLimitRaw) : Infinity;
-        const statsMap = {};
-        albumCheckedList.forEach(emp=>{ statsMap[emp] = { total:0, whiteHours:0, midHours:0, whiteDays:0, midDays:0 }; });
-        const plan = {};
-        let usedFallback = false;
-        let missingCandidate = false;
-        const chooseCandidate = (candidates, type, hourValue)=>{
-          if(candidates.length===0){ missingCandidate = true; return ''; }
-          const sorted = [...candidates].sort((a,b)=>{
-            if(statsMap[a].total !== statsMap[b].total) return statsMap[a].total - statsMap[b].total;
-            if(type==='white' && statsMap[a].whiteDays !== statsMap[b].whiteDays) return statsMap[a].whiteDays - statsMap[b].whiteDays;
-            if(type==='mid' && statsMap[a].midDays !== statsMap[b].midDays) return statsMap[a].midDays - statsMap[b].midDays;
-            return a.localeCompare(b, 'zh-CN');
-          });
-          const feasible = sorted.filter(emp=>{
-            if(diffLimit===Infinity) return true;
-            const totals = albumCheckedList.map(name=> name===emp ? statsMap[name].total + hourValue : statsMap[name].total);
-            const maxVal = Math.max(...totals);
-            const minVal = Math.min(...totals);
-            return (maxVal - minVal) <= diffLimit + 1e-9;
-          });
-          const pick = feasible.length? feasible[0] : sorted[0];
-          if(!feasible.length && diffLimit!==Infinity) usedFallback = true;
-          statsMap[pick].total += hourValue;
-          if(type==='white'){ statsMap[pick].whiteHours += hourValue; statsMap[pick].whiteDays += 1; }
-          if(type==='mid'){ statsMap[pick].midHours += hourValue; statsMap[pick].midDays += 1; }
-          return pick;
-        };
-        albumDates.forEach(day=>{
-          const row = data[day] || {};
-          const whiteCandidates = albumCheckedList.filter(emp=> row[emp]==='白');
-          const midCandidates = albumCheckedList.filter(emp=> row[emp]==='中1');
-          const white = chooseCandidate(whiteCandidates, 'white', albumWhiteHourValue);
-          const mid = chooseCandidate(midCandidates, 'mid', albumMidHourValue);
-          plan[day] = { white: white||'', mid: mid||'' };
+        const { plan, note } = planAlbumSchedule({
+          albumDates,
+          albumCheckedList,
+          data,
+          whiteHour: albumWhiteHourValue,
+          midHour: albumMidHourValue,
+          diffLimit
         });
         setAlbumAssignments(plan);
-        if(missingCandidate){
-          setAlbumAutoNote('部分日期缺少符合条件的白班或中1人员，请检查并手动补充。');
-        } else if(usedFallback){
-          setAlbumAutoNote('已尽量平均分配，但存在超出差值限制的情况，请复核。');
-        } else {
-          setAlbumAutoNote('自动生成完成，可继续手动微调，统计实时更新。');
-        }
+        setAlbumAutoNote(note);
       };
 
       const updateAlbumAssignment = (day, field, value)=>{
+        if(editingLocked) return;
         setAlbumAssignments(prev=> ({
           ...prev,
           [day]: { ...(prev?.[day]||{ white:'', mid:'' }), [field]: value }
@@ -2272,23 +2870,23 @@
         <Section title="专辑审核自动排班" right={<span className="text-xs text-gray-500">白班 1 人 + 中1 1 人，时长均衡的审核计划</span>}>
           <div className="grid grid-cols-1 xl:grid-cols-4 gap-4 items-start">
             <div className="space-y-4">
-              <AlbumEmployeeChecklist/>
               <div className="rounded-2xl border bg-gradient-to-br from-white via-white to-amber-50/60 p-4 space-y-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-amber-700"><Icon name="magic" className="w-4 h-4"/>自动排班参数</div>
                 <div className="grid grid-cols-1 gap-2 text-sm text-gray-600">
                   <label className="flex items-center justify-between gap-2">开始月份<MonthInput className="border rounded px-2 py-1" value={albumRangeStartMonth} onChange={setAlbumRangeStartMonth} disabled={editingLocked} /></label>
                   <label className="flex items-center justify-between gap-2">结束月份<MonthInput className="border rounded px-2 py-1" value={albumRangeEndMonth} onChange={setAlbumRangeEndMonth} disabled={editingLocked} /></label>
-                  <label className="flex items-center justify-between gap-2">白班时长（小时）<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumWhiteHour}
-                    onChange={e=> setAlbumWhiteHour(Number.parseFloat(e.target.value||'0')||0)} /></label>
-                  <label className="flex items-center justify-between gap-2">中1时长（小时）<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumMidHour}
-                    onChange={e=> setAlbumMidHour(Number.parseFloat(e.target.value||'0')||0)} /></label>
-                  <label className="flex items-center justify-between gap-2">允许时长差值 ±<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumMaxDiff}
-                    onChange={e=> setAlbumMaxDiff(e.target.value===''?0:Number.parseFloat(e.target.value)||0)} /></label>
+                  <label className="flex items-center justify-between gap-2">白班时长（小时）<input type="number" step="0.01" min="0" className={`border rounded px-2 py-1 w-24 text-right ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={albumWhiteHour}
+                    onChange={e=> setAlbumWhiteHour(Number.parseFloat(e.target.value||'0')||0)} disabled={editingLocked} /></label>
+                  <label className="flex items-center justify-between gap-2">中1时长（小时）<input type="number" step="0.01" min="0" className={`border rounded px-2 py-1 w-24 text-right ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={albumMidHour}
+                    onChange={e=> setAlbumMidHour(Number.parseFloat(e.target.value||'0')||0)} disabled={editingLocked} /></label>
+                  <label className="flex items-center justify-between gap-2">允许时长差值 ±<input type="number" step="0.01" min="0" className={`border rounded px-2 py-1 w-24 text-right ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={albumMaxDiff}
+                    onChange={e=> setAlbumMaxDiff(e.target.value===''?0:Number.parseFloat(e.target.value)||0)} disabled={editingLocked} /></label>
                 </div>
-                <PillBtn color="indigo" onClick={autoAssignAlbum} disabled={editingLocked || albumCheckedList.length===0 || albumDates.length===0} title={albumCheckedList.length===0? '请先勾选人员': albumDates.length===0? '请先设置有效月份范围': (editingLocked?'执行中：只读':'' )}>智能生成专辑审核排班</PillBtn>
+                <PillBtn color="indigo" onClick={autoAssignAlbum} disabled={editingLocked || albumCheckedList.length===0 || albumDates.length===0} title={editingLocked ? '当前账号仅支持查看，无法执行自动排班' : (albumCheckedList.length===0? '请先勾选人员': albumDates.length===0? '请先设置有效月份范围': '')}>智能生成专辑审核排班</PillBtn>
                 {albumAutoNote && <div className="text-xs text-indigo-600 bg-indigo-50/80 border border-indigo-100 rounded-xl px-3 py-2">{albumAutoNote}</div>}
                 <div className="text-xs text-gray-500">提示：参数调整后可重新生成；排班结果支持右侧表格内手动微调。</div>
               </div>
+              <AlbumEmployeeChecklist/>
             </div>
 
             <div className="space-y-4 xl:col-span-3">
@@ -2358,8 +2956,8 @@
                           const weekLabel = WN[new Date(day).getDay()];
                           const whiteCandidates = albumCheckedList.filter(emp=> (row[emp]||'')==='白');
                           const midCandidates = albumCheckedList.filter(emp=> (row[emp]||'')==='中1');
-                          const whiteClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.white ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'}`;
-                          const midClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.mid ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'}`;
+                          const whiteClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.white ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'} ${editingLocked?'opacity-60 cursor-not-allowed':''}`;
+                          const midClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.mid ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'} ${editingLocked?'opacity-60 cursor-not-allowed':''}`;
                           return (
                             <tr key={`album-${day}`} className="border-t hover:bg-indigo-50/20">
                               <td className="py-1.5 px-3 font-medium text-gray-700">{day}</td>
@@ -2369,7 +2967,8 @@
                                   className={whiteClass}
                                   value={info.white || ''}
                                   onChange={e=> updateAlbumAssignment(day, 'white', e.target.value)}
-                                  title={whiteCandidates.length===0 ? '当日无白班可选' : '请选择白班审核人'}
+                                  title={editingLocked ? '当前账号仅支持查看' : (whiteCandidates.length===0 ? '当日无白班可选' : '请选择白班审核人')}
+                                  disabled={editingLocked}
                                 >
                                   <option value="">未分配</option>
                                   {whiteCandidates.map(emp=> (
@@ -2382,7 +2981,8 @@
                                   className={midClass}
                                   value={info.mid || ''}
                                   onChange={e=> updateAlbumAssignment(day, 'mid', e.target.value)}
-                                  title={midCandidates.length===0 ? '当日无中1可选' : '请选择中班审核人'}
+                                  title={editingLocked ? '当前账号仅支持查看' : (midCandidates.length===0 ? '当日无中1可选' : '请选择中班审核人')}
+                                  disabled={editingLocked}
                                 >
                                   <option value="">未分配</option>
                                   {midCandidates.map(emp=> (
@@ -2572,11 +3172,15 @@
       );
 
       function periodRanges(){
-        const dS=new Date(start);
+        const baseStart = viewStart || planStart;
+        const baseEnd = viewEnd || planEnd;
+        const orderedStart = baseStart <= baseEnd ? baseStart : baseEnd;
+        const orderedEnd = baseStart <= baseEnd ? baseEnd : baseStart;
+        const dS=new Date(orderedStart);
         const yS = fmt(new Date(dS.getFullYear(),0,1)); const yE = fmt(new Date(dS.getFullYear(),11,31));
         const q = Math.floor(dS.getMonth()/3); const qS = fmt(new Date(dS.getFullYear(), q*3, 1)); const qE = fmt(new Date(dS.getFullYear(), q*3+3, 0));
         const mS = fmt(new Date(dS.getFullYear(), dS.getMonth(), 1)); const mE = fmt(new Date(dS.getFullYear(), dS.getMonth()+1, 0));
-        return { y:{s:yS,e:yE}, q:{s:qS,e:qE}, m:{s:mS,e:mE}, r:{s:start,e:end} };
+        return { y:{s:yS,e:yE}, q:{s:qS,e:qE}, m:{s:mS,e:mE}, r:{s:orderedStart,e:orderedEnd} };
       }
       const ViewStats = (()=>{
         const ranges = periodRanges();
@@ -2587,7 +3191,7 @@
         const [albumStatMode, setAlbumStatMode] = useState('analysis');
         const cur = statPeriod==='y'? ranges.y : statPeriod==='q'? ranges.q : statPeriod==='m'? ranges.m : ranges.r;
         const daysLen = useMemo(()=> enumerateDates(cur.s, cur.e).length, [cur.s, cur.e]);
-        const C = useMemo(()=> countByEmpInRange(employees, data, cur.s, cur.e), [employees,data,statPeriod,start,end]);
+        const C = useMemo(()=> countByEmpInRange(employees, data, cur.s, cur.e), [employees, data, cur.s, cur.e]);
         const avg = useMemo(()=>{ const sum={白:0,中1:0,中2:0,夜:0,总:0}; for(const e of employees){ sum.白+=C[e]?.白||0; sum.中1+=C[e]?.中1||0; sum.中2+=C[e]?.中2||0; sum.夜+=C[e]?.夜||0; sum.总+=C[e]?.总||0; } const n = Math.max(1, employees.length); return { 白:(sum.白/n).toFixed(1), 中1:(sum.中1/n).toFixed(1), 中2:(sum.中2/n).toFixed(1), 夜:(sum.夜/n).toFixed(1), 总:(sum.总/n).toFixed(1) }; }, [employees, C]);
 
         // —— 新增：每日分布与总和分析 ——
@@ -2697,44 +3301,87 @@
           });
         }, [restCycles, monthSpans]);
 
-        const albumEntriesInRange = useMemo(()=> albumHistory.filter(entry=>{
-          if(!entry || !entry.range) return false;
-          const rs = entry.range.start;
-          const re = entry.range.end;
-          if(!rs || !re) return false;
-          return !(re < cur.s || rs > cur.e);
-        }), [albumHistory, cur.s, cur.e]);
+        const albumEntriesSorted = useMemo(()=>{
+          const parseStamp = (entry)=>{
+            const raw = entry?.savedAt || entry?.createdAt || entry?.updatedAt || '';
+            const ts = raw ? Date.parse(raw) : 0;
+            return Number.isFinite(ts) ? ts : 0;
+          };
+          return albumHistory.slice().sort((a,b)=>{
+            const diff = parseStamp(b) - parseStamp(a);
+            if(diff !== 0) return diff;
+            const keyA = albumEntryKey(a);
+            const keyB = albumEntryKey(b);
+            return keyB.localeCompare(keyA);
+          });
+        }, [albumHistory]);
+        const albumAggregate = useMemo(()=>{
+          const dayAssignment = {};
+          const entryActiveCount = {};
+          albumEntriesSorted.forEach((entry, idx)=>{
+            const key = albumEntryKey(entry, idx);
+            const assignments = entry?.assignments || {};
+            const whiteHour = Number(entry?.whiteHour) || 0;
+            const midHour = Number(entry?.midHour) || 0;
+            Object.entries(assignments).forEach(([day, info])=>{
+              if(dayAssignment[day]) return;
+              dayAssignment[day] = {
+                white: info?.white || '',
+                mid: info?.mid || '',
+                whiteHour,
+                midHour,
+                key
+              };
+              entryActiveCount[key] = (entryActiveCount[key] || 0) + 1;
+            });
+          });
+          return { dayAssignment, entryActiveCount };
+        }, [albumEntriesSorted]);
+        const albumEntriesInRange = useMemo(()=>{
+          if(!cur?.s || !cur?.e) return [];
+          const result = [];
+          albumEntriesSorted.forEach((entry, idx)=>{
+            const assignments = entry?.assignments || {};
+            if(!assignments || !Object.keys(assignments).length) return;
+            const key = albumEntryKey(entry, idx);
+            const activeCount = albumAggregate.entryActiveCount[key] || 0;
+            if(activeCount === 0) return;
+            for(const day of Object.keys(assignments)){
+              if(day < cur.s || day > cur.e) continue;
+              if(albumAggregate.dayAssignment[day]?.key === key){
+                result.push({ entry, key, activeCount });
+                break;
+              }
+            }
+          });
+          return result;
+        }, [albumEntriesSorted, albumAggregate, cur?.s, cur?.e]);
         const albumAnalysis = useMemo(()=>{
           const perEmp = {};
           const employeeSet = new Set();
           const summary = { batches: albumEntriesInRange.length, whiteDays:0, midDays:0, whiteHours:0, midHours:0, totalHours:0 };
-          albumEntriesInRange.forEach(entry=>{
-            const assignments = entry.assignments || {};
-            const whiteHour = Number(entry.whiteHour)||0;
-            const midHour = Number(entry.midHour)||0;
-            Object.entries(assignments).forEach(([day, info])=>{
-              if(day < cur.s || day > cur.e) return;
-              const whiteName = info?.white || '';
-              const midName = info?.mid || '';
-              if(whiteName){
-                if(!perEmp[whiteName]) perEmp[whiteName] = { whiteDays:0, whiteHours:0, midDays:0, midHours:0 };
-                perEmp[whiteName].whiteDays += 1;
-                perEmp[whiteName].whiteHours += whiteHour;
-                summary.whiteDays += 1;
-                summary.whiteHours += whiteHour;
-                summary.totalHours += whiteHour;
-                employeeSet.add(whiteName);
-              }
-              if(midName){
-                if(!perEmp[midName]) perEmp[midName] = { whiteDays:0, whiteHours:0, midDays:0, midHours:0 };
-                perEmp[midName].midDays += 1;
-                perEmp[midName].midHours += midHour;
-                summary.midDays += 1;
-                summary.midHours += midHour;
-                summary.totalHours += midHour;
-                employeeSet.add(midName);
-              }
-            });
+          Object.entries(albumAggregate.dayAssignment).forEach(([day, detail])=>{
+            if(!detail) return;
+            if(day < cur.s || day > cur.e) return;
+            const { white, mid, whiteHour, midHour } = detail;
+            if(white){
+              if(!perEmp[white]) perEmp[white] = { whiteDays:0, whiteHours:0, midDays:0, midHours:0 };
+              perEmp[white].whiteDays += 1;
+              perEmp[white].whiteHours += whiteHour;
+              summary.whiteDays += 1;
+              summary.whiteHours += whiteHour;
+              summary.totalHours += whiteHour;
+              employeeSet.add(white);
+            }
+            if(mid){
+              if(!perEmp[mid]) perEmp[mid] = { whiteDays:0, whiteHours:0, midDays:0, midHours:0 };
+              perEmp[mid].midDays += 1;
+              perEmp[mid].midHours += midHour;
+              summary.midDays += 1;
+              summary.midHours += midHour;
+              summary.totalHours += midHour;
+              employeeSet.add(mid);
+            }
           });
           const rows = Object.entries(perEmp).map(([emp,val])=> ({
             emp,
@@ -2757,10 +3404,21 @@
               avgHoursPerEmployee: employeeCount? summary.totalHours / employeeCount : 0
             }
           };
-        }, [albumEntriesInRange, cur.s, cur.e]);
-        const albumHistoryForView = useMemo(()=> albumEntriesInRange.slice().sort((a,b)=>{
-          return new Date(b?.savedAt || 0) - new Date(a?.savedAt || 0);
-        }), [albumEntriesInRange]);
+        }, [albumAggregate, albumEntriesInRange.length, cur.s, cur.e]);
+        const albumHistoryForView = useMemo(()=>{
+          if(!cur?.s || !cur?.e) return [];
+          const result = [];
+          albumEntriesSorted.forEach((entry, idx)=>{
+            const assignments = entry?.assignments || {};
+            if(!assignments || !Object.keys(assignments).length) return;
+            const hasOverlap = Object.keys(assignments).some(day=> day>=cur.s && day<=cur.e);
+            if(!hasOverlap) return;
+            const key = albumEntryKey(entry, idx);
+            const activeCount = albumAggregate.entryActiveCount[key] || 0;
+            result.push({ entry, key, activeCount });
+          });
+          return result;
+        }, [albumEntriesSorted, albumAggregate, cur?.s, cur?.e]);
         const albumSummary = albumAnalysis.summary || { batches:0, whiteDays:0, midDays:0, whiteHours:0, midHours:0, totalHours:0, employeeCount:0, avgTotalHoursPerBatch:0, avgWhiteHoursPerBatch:0, avgMidHoursPerBatch:0, avgHoursPerEmployee:0 };
         const albumRows = albumAnalysis.rows || [];
 
@@ -3049,16 +3707,18 @@
                     <div className="text-sm text-gray-500">当前统计周期内暂无历史排班，可在专辑审核自动排班页确认后查看。</div>
                   ) : (
                     <div className="space-y-4">
-                      {albumHistoryForView.map(entry=> {
-                        const days = Object.keys(entry.assignments||{}).filter(day=> day>=cur.s && day<=cur.e).sort();
-                        const savedAt = entry.savedAt ? new Date(entry.savedAt).toLocaleString() : '—';
-                        const totals = entry.totals || {};
-                        const coverage = entry.coverage || {};
+                      {albumHistoryForView.map(({ entry, key, activeCount })=> {
+                        const assignments = entry?.assignments || {};
+                        const days = Object.keys(assignments).filter(day=> day>=cur.s && day<=cur.e && albumAggregate.dayAssignment[day]?.key === key).sort();
+                        const savedAt = entry?.savedAt ? new Date(entry.savedAt).toLocaleString() : '—';
+                        const totals = entry?.totals || {};
+                        const coverage = entry?.coverage || {};
+                        const isCovered = days.length===0;
                         return (
-                          <div key={entry.id} className="rounded-2xl border bg-white overflow-hidden shadow-sm">
+                          <div key={key} className="rounded-2xl border bg-white overflow-hidden shadow-sm">
                             <div className="px-4 py-3 border-b bg-gray-50 text-sm font-medium text-gray-700 flex flex-wrap items-center justify-between gap-2">
                               <div className="flex flex-col sm:flex-row sm:items-center sm:gap-3">
-                                <span>{entry.range?.start} ~ {entry.range?.end}</span>
+                                <span>{entry?.range?.start} ~ {entry?.range?.end}</span>
                                 <span className="text-xs text-gray-400">保存于 {savedAt}</span>
                               </div>
                               <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
@@ -3067,10 +3727,15 @@
                                 <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">总时长 {(Number(totals.totalHours)||0).toFixed(2)} 小时</span>
                                 <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">时长差值 {(Number(entry.diff)||0).toFixed(2)} 小时</span>
                                 <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-700">覆盖 {coverage.totalDays||0} 天</span>
+                                {isCovered ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">已被后续排班覆盖</span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">当前生效 {days.length} 天</span>
+                                )}
                               </div>
                             </div>
                             {days.length===0 ? (
-                              <div className="p-4 text-xs text-gray-500">当前统计周期内与该记录无重叠日期。</div>
+                              <div className="p-4 text-xs text-gray-500">该记录在当前统计周期内已被后续排班覆盖。</div>
                             ) : (
                               <div className="overflow-auto">
                                 <table className="min-w-[600px] w-full text-sm">
@@ -3084,10 +3749,10 @@
                                   </thead>
                                   <tbody>
                                     {days.map(day=>{
-                                      const info = entry.assignments?.[day] || {};
+                                      const info = assignments?.[day] || {};
                                       const wk = WN[new Date(day).getDay()];
                                       return (
-                                        <tr key={`${entry.id}-${day}`} className="border-t hover:bg-indigo-50/20">
+                                        <tr key={`${key}-${day}`} className="border-t hover:bg-indigo-50/20">
                                           <td className="py-1.5 px-3 font-medium text-gray-700">{day}</td>
                                           <td className="py-1.5 px-3 text-gray-500">周{wk}</td>
                                           <td className="py-1.5 px-3"><span className={`inline-block px-2 py-0.5 rounded-full text-xs ${info.white ? 'bg-white border border-gray-200 text-gray-700' : 'bg-rose-50 border border-rose-200 text-rose-600'}`}>{info.white || '未分配'}</span></td>
@@ -3112,21 +3777,28 @@
       })();
 
       const ViewHistory = (
-        <Section title={`历史版本（${teamDisplayName}）`} right={<button onClick={loadVersions} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(editingLocked || versionsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={editingLocked || versionsLoading}>
-          {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新列表'}
-        </button>}>
-          {versionsLoading && versions.length>0 && (
+        <Section title={`历史版本（${teamDisplayName}）`} right={<div className="flex items-center gap-3">
+          <label className="inline-flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" className="rounded" checked={showAutoSaves} onChange={e=> setShowAutoSaves(e.target.checked)} />显示自动保存</label>
+          <button onClick={loadVersions} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(editingLocked || versionsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={editingLocked || versionsLoading}>
+            {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新列表'}
+          </button>
+        </div>}>
+          {versionsLoading && filteredVersions.length>0 && (
             <div className="flex items-center gap-2 text-xs text-gray-500 mb-3">
               <Spinner className="w-4 h-4 text-indigo-500" />
               <span>正在刷新历史版本，请稍候…</span>
             </div>
           )}
-          {versionsLoading && versions.length===0 ? (
+          {versionsLoading && filteredVersions.length===0 ? (
             <div className="text-sm text-gray-500">正在加载历史版本…</div>
-          ) : versions.length===0 ? (
-            <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无历史版本，请在“设置 / 导出”页保存新版本或稍后刷新。</p>
+          ) : filteredVersions.length===0 ? (
+            versions.length>0 && !showAutoSaves && versions.some(v=> (v?.created_by_name || v?.created_by || '').trim()==='自动保存') ? (
+              <p className="text-sm text-gray-500">当前筛选仅隐藏了自动保存记录，如需查看请勾选“显示自动保存”。</p>
+            ) : (
+              <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无历史版本，请在“设置 / 导出”页保存新版本或稍后刷新。</p>
+            )
           ) : (
-            <div className="overflow-auto max-h-64">
+            <div className="overflow-auto rounded-2xl border" style={{ maxHeight: 'min(70vh, calc(100vh - 240px))' }}>
               <table className="text-sm w-full min-w-[780px]">
                 <thead className="bg-gray-50 text-gray-500">
                   <tr>
@@ -3140,12 +3812,14 @@
                   </tr>
                 </thead>
                 <tbody>
-                  {versions.map(v=> {
+                  {filteredVersions.map(v=> {
                     const name = v.note || v.name || '';
                     const remark = v.remark || v.description || '';
                     const teamName = v.team_name || v.teamName || teamDisplayName;
                     const createdAt = v.created_at || v.createdAt || '—';
-                    const operator = v.created_by_name || v.created_by || '管理员';
+                    const operatorRaw = v.created_by_name || v.created_by || '管理员';
+                    const operator = operatorRaw || '管理员';
+                    const isAuto = (operatorRaw || '').trim() === '自动保存';
                     const deleting = versionDeletingId === v.id;
                     return (
                       <tr key={v.id} className="border-t hover:bg-gray-50">
@@ -3155,7 +3829,10 @@
                         <td className="py-1 px-3 text-gray-600">{teamName}</td>
                         <td className="py-1 px-3 text-gray-600">{v.id}</td>
                         <td className="py-1 px-3 text-gray-600">{createdAt}</td>
-                        <td className="py-1 px-3 text-gray-600">{operator}</td>
+                        <td className="py-1 px-3 text-gray-600">
+                          <span>{operator}</span>
+                          {isAuto && <span className="ml-2 inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-500">自动保存</span>}
+                        </td>
                         <td className="py-1 px-3 text-gray-600">{remark || '—'}</td>
                         <td className="py-1 px-3">
                           <div className="flex items-center gap-3">
@@ -3175,7 +3852,7 @@
         </Section>
       );
       const scheduleYearLabel = (()=>{
-        const rawYear = (start || '').slice(0,4);
+        const rawYear = (planStart || '').slice(0,4);
         return /^\d{4}$/.test(rawYear) ? rawYear : String(today.getFullYear());
       })();
       const ViewSettings = (
@@ -3184,15 +3861,21 @@
             <div>
               <label className="block text-sm text-gray-600 mb-1">保存备注</label>
               <input className="w-full border rounded px-3 py-2" value={note}
-                onCompositionStart={()=>{}}
-                onCompositionEnd={(e)=>{ setNote(e.target.value); }}
-                onChange={e=>setNote(e.target.value)} placeholder="例如：10月第一版"/>
+                onCompositionStart={e=>{ e.target.isComposing = true; }}
+                onCompositionEnd={e=>{ e.target.isComposing = false; setNote(e.target.value); }}
+                onChange={allowIme(e=>setNote(e.target.value))} placeholder="例如：10月第一版"/>
             </div>
             <div className="flex flex-wrap items-end gap-2">
               <PillBtn onClick={saveToServer} color="emerald" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存新版本</PillBtn>
               <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>服务器导出 Excel/CSV</PillBtn>
+              <PillBtn onClick={downloadTemplate} color="gray">下载导入模板</PillBtn>
+              <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?'执行中：只读':(importing?'导入中…':'')}>
+                {importing ? (<><Spinner className="w-4 h-4 text-white" /> 导入中…</>) : '导入 Excel' }
+              </PillBtn>
+              <input type="file" ref={importInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={onImportInputChange} />
             </div>
           </div>
+          <div className="mt-2 text-xs text-gray-500">导入支持 XLSX / XLS / CSV 格式，将覆盖当前排班并自动更新周期。</div>
           <div className="mt-6">
             <h3 className="font-semibold mb-2">自动排班优化</h3>
             <label className={`flex items-start gap-3 text-sm ${editingLocked?'opacity-60':''}`}>
@@ -3269,13 +3952,17 @@
                       <label className="flex flex-col text-sm text-gray-600">
                         <span className="mb-1">团队名称</span>
                         <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={t.name}
-                          onChange={e=> updateTeamField(t.id, 'name', e.target.value)} disabled={editingLocked} />
+                          onCompositionStart={e=>{ e.target.isComposing = true; }}
+                          onCompositionEnd={e=>{ e.target.isComposing = false; updateTeamField(t.id, 'name', e.target.value); }}
+                          onChange={allowIme(e=> updateTeamField(t.id, 'name', e.target.value))} disabled={editingLocked} />
                       </label>
                       <div className="text-xs text-gray-500">ID：{t.id}</div>
                       <label className="flex-1 flex flex-col text-sm text-gray-600 min-w-[200px]">
                         <span className="mb-1">备注</span>
                         <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={t.remark||''}
-                          onChange={e=> updateTeamField(t.id, 'remark', e.target.value)} disabled={editingLocked} />
+                          onCompositionStart={e=>{ e.target.isComposing = true; }}
+                          onCompositionEnd={e=>{ e.target.isComposing = false; updateTeamField(t.id, 'remark', e.target.value); }}
+                          onChange={allowIme(e=> updateTeamField(t.id, 'remark', e.target.value))} disabled={editingLocked} />
                       </label>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-4 text-sm">
@@ -3311,12 +3998,16 @@
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">账号</span>
                           <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.username}
-                            onChange={e=> setAccountUsername(acc.username, e.target.value)} disabled={editingLocked} />
+                            onCompositionStart={e=>{ e.target.isComposing = true; }}
+                            onCompositionEnd={e=>{ e.target.isComposing = false; setAccountUsername(acc.username, e.target.value); }}
+                            onChange={allowIme(e=> setAccountUsername(acc.username, e.target.value))} disabled={editingLocked} />
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">显示名称</span>
                           <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.displayName||''}
-                            onChange={e=> setAccountDisplayName(acc.username, e.target.value)} disabled={editingLocked} />
+                            onCompositionStart={e=>{ e.target.isComposing = true; }}
+                            onCompositionEnd={e=>{ e.target.isComposing = false; setAccountDisplayName(acc.username, e.target.value); }}
+                            onChange={allowIme(e=> setAccountDisplayName(acc.username, e.target.value))} disabled={editingLocked} />
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">角色</span>
@@ -3339,14 +4030,14 @@
                       <div>
                         <div className="text-xs text-gray-500 mb-1">可切换团队</div>
                         <div className="flex flex-wrap gap-3">
-                          <label className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60':''}`}>
+                          <label className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60 cursor-not-allowed':'hover:text-indigo-600'}`}>
                             <input type="checkbox" checked={hasAll} disabled={editingLocked}
                               onChange={e=> setAccountAllTeams(acc.username, e.target.checked)} /> 全部团队
                           </label>
                           {teamsList.map(teamItem=> (
-                            <label key={teamItem.id} className={`inline-flex items-center gap-2 ${hasAll?'opacity-60':''}`}>
-                              <input type="checkbox" disabled={editingLocked || hasAll} checked={hasAll || (acc.teamAccess||[]).includes(teamItem.id)}
-                                onChange={()=> toggleAccountTeam(acc.username, teamItem.id)} /> {teamItem.name}
+                            <label key={teamItem.id} className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60 cursor-not-allowed':'hover:text-indigo-600'}`}>
+                              <input type="checkbox" disabled={editingLocked} checked={hasAll || (acc.teamAccess||[]).includes(teamItem.id)}
+                                onChange={e=> setAccountTeamAccess(acc.username, teamItem.id, e.target.checked)} /> {teamItem.name}
                             </label>
                           ))}
                         </div>
@@ -3387,28 +4078,35 @@
         </Section>
       );
 
+      const userDisplayName = user ? (user.display_name || user.displayName || user.username || '访客') : '';
       const Topbar = (
         <div className="sticky top-0 z-30 bg-gradient-to-b from-white/90 to-white/60 backdrop-blur border-b">
-          <div className="max-w-[1400px] mx-auto px-4 py-3 flex items-center gap-3">
-            <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
+          <div className="layout-shell py-3 flex items-center gap-3">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:gap-3 gap-1">
+              <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
+              {userDisplayName && <span className="text-sm text-gray-500">您好，{userDisplayName}</span>}
+            </div>
             <div className="flex-1"></div>
             <div className="flex lg:hidden items-center gap-2 text-sm mr-2">
               <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
             </div>
             <div className="hidden lg:flex items-center gap-2 text-sm">
               <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
-              <input type="date" className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={start} onChange={e=>setStart(e.target.value)} disabled={editingLocked} />
+              <input type="date" className="border rounded px-3 py-1.5" value={viewStart} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewStart(e.target.value); }} />
               <span className="text-gray-400">—</span>
-              <input type="date" className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={end} onChange={e=>setEnd(e.target.value)} disabled={editingLocked} />
+              <input type="date" className="border rounded px-3 py-1.5" value={viewEnd} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewEnd(e.target.value); }} />
             </div>
             <div className="flex items-center gap-2">
               <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked}>导出</PillBtn>
-              <button onClick={()=> clearRange('empty')} className={`px-3 py-1.5 rounded-full text-sm ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-amber-100 hover:bg-amber-200'}`} disabled={editingLocked}>清空当前范围</button>
-              {user ? (<button onClick={async()=>{ await apiPost('/logout',{}).catch(()=>{}); setUser(null); }} className={`px-3 py-1.5 rounded-full text-sm ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={editingLocked}>退出</button>) : (<span className="text-xs text-gray-500">未登录</span>)}
+              {user ? (
+                <button onClick={doLogout} className={`px-3 py-1.5 rounded-full text-sm ${prog.running?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={prog.running}>退出</button>
+              ) : (
+                <span className="text-xs text-gray-500">未登录</span>
+              )}
             </div>
           </div>
           {Object.keys(nightIssues).length>0 && (
-            <div className="max-w-[1400px] mx-auto px-4 pb-2 text-sm text-red-600">夜班窗口缺：{Object.entries(nightIssues).slice(0,10).map(([k,v])=>`${k}${v==='缺夜&中2'?'(缺夜&中2)':v==='缺夜'?'(缺夜)':'(缺中2)'}`).join('，')}{Object.keys(nightIssues).length>10?' …':''}</div>
+            <div className="layout-shell pb-2 text-sm text-red-600">夜班窗口缺：{Object.entries(nightIssues).slice(0,10).map(([k,v])=>`${k}${v==='缺夜&中2'?'(缺夜&中2)':v==='缺夜'?'(缺夜)':'(缺中2)'}`).join('，')}{Object.keys(nightIssues).length>10?' …':''}</div>
           )}
         </div>
       );
@@ -3418,7 +4116,7 @@
       return (
         <div className="min-h-screen">
           {Topbar}
-          <div className="max-w-[1400px] mx-auto px-4 py-6">
+          <div className="layout-shell py-6">
             <SideDock tab={tab} setTab={setTab} menuPerms={menuPerms}/>
             <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.3</footer></main>
           </div>
@@ -3445,10 +4143,31 @@
           )}
           {picker.open && (
             <div className="fixed z-50" style={{ left: picker.x, top: picker.y }}>
-              <div ref={pickerRef} className="picker bg-white border rounded-xl p-1 w-40">
-                {SHIFT_TYPES.map(s=> (
-                  <button key={s} className="w-full text-left px-3 py-2 rounded hover:bg-gray-100" onClick={()=>{ setCellByIndex(picker.di, picker.ei, s); setPicker(p=>({...p, open:false})); }}>{s}</button>
-                ))}
+              <div ref={pickerRef} className="picker bg-white border rounded-xl p-1 w-40" style={{ maxHeight: 'min(320px, calc(100vh - 40px))', overflowY: 'auto' }}>
+                {SHIFT_TYPES.map(s=> {
+                  let helper = '';
+                  if(s === '夜'){
+                    if(!pickerContext) helper = '';
+                    else if(pickerContext.nightGap == null) helper = '距上次夜班：暂无记录';
+                    else helper = `距上次夜班：${pickerContext.nightGap} 天`;
+                  } else if(s === '中2'){
+                    if(!pickerContext) helper = '';
+                    else if(pickerContext.mid2Gap == null) helper = '距上次中2：暂无记录';
+                    else helper = `距上次中2：${pickerContext.mid2Gap} 天`;
+                  }
+                  return (
+                    <button
+                      key={s}
+                      className="w-full text-left px-3 py-2 rounded hover:bg-gray-100"
+                      onClick={()=>{ setCellByIndex(picker.di, picker.ei, s); setPicker(p=>({...p, open:false})); }}
+                    >
+                      <div className="flex flex-col text-sm">
+                        <span className="font-medium text-gray-700">{s}</span>
+                        {helper && <span className="text-[11px] text-gray-500 mt-0.5">{helper}</span>}
+                      </div>
+                    </button>
+                  );
+                })}
                 <div className="h-px bg-gray-100 my-1"></div>
                 <button className="w-full text-left px-3 py-2 rounded hover:bg-gray-100" onClick={()=>{ setCellByIndex(picker.di, picker.ei, ''); setPicker(p=>({...p, open:false})); }}>清空</button>
               </div>
