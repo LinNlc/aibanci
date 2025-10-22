@@ -54,7 +54,7 @@
   <script src="static/js/scheduler-algorithms.js"></script>
 
   <script type="text/babel" data-presets="env,react">
-    const { useState, useMemo, useEffect, useRef } = React;
+    const { useState, useMemo, useEffect, useRef, useCallback } = React;
 
     function globalErr(msg){ const bar = document.getElementById('errbar'); if(bar){ bar.textContent = '错误：' + msg; bar.className = 'show bg-red-50 text-red-700 text-sm px-4 py-2'; } }
     window.addEventListener('error', (e)=> globalErr(e?.message || '脚本错误'));
@@ -83,6 +83,7 @@
     );
 
     const API_BASE = '/api';
+    const EMPTY_ROW = Object.freeze({});
     const WN = ['日','一','二','三','四','五','六'];
     const today = new Date();
     const SHIFT_TYPES = ['白','中1','中2','夜','休'];
@@ -129,6 +130,18 @@
       const mondayIdx = (d.getDay()+6)%7;
       d.setDate(d.getDate()-mondayIdx);
       return fmt(d);
+    }
+
+    function albumEntryKey(entry, fallbackIndex = 0){
+      if(entry && entry.id) return String(entry.id);
+      if(entry && entry.savedAt){
+        const stamp = Date.parse(entry.savedAt);
+        if(Number.isFinite(stamp)) return `${entry.savedAt}`;
+      }
+      if(entry && entry.range && entry.range.start && entry.range.end){
+        return `${entry.range.start}_${entry.range.end}_${fallbackIndex}`;
+      }
+      return `album_${fallbackIndex}`;
     }
 
     async function apiGet(path){ const r = await fetch(API_BASE + path, { credentials: 'include' }); if(!r.ok){ let msg='请求失败'; try { const e=await r.json(); msg=e.message||msg; } catch{} throw new Error(msg); } return r.json(); }
@@ -851,6 +864,14 @@
       const [versionId, setVersionId] = useState(null);
       const [versions, setVersions]   = useState([]);
       const [versionsLoading, setVersionsLoading] = useState(false);
+      const [showAutoSaves, setShowAutoSaves] = useState(false);
+      const filteredVersions = useMemo(()=>{
+        if(showAutoSaves) return versions;
+        return versions.filter(v=>{
+          const operator = (v?.created_by_name || v?.created_by || '').trim();
+          return operator !== '自动保存';
+        });
+      }, [versions, showAutoSaves]);
       const [versionDeletingId, setVersionDeletingId] = useState(null);
       const [toast, setToast] = useState(null);
       const toastTimerRef = useRef(null);
@@ -1903,10 +1924,31 @@
         return allDateKeys.filter(day=> (!s || day >= s) && (!e || day <= e));
       }, [planStart, planEnd, allDateKeys]);
       const activeCellRef = useRef(null);
-      function setCellByIndex(dIndex, eIndex, value){ const d = dateList[dIndex]; const emp = employees[eIndex]; if(!d||!emp) return; setData(prev=>{ const next = { ...prev }; const row = { ...(next[d]||{}) }; row[emp] = value; next[d] = row; return next; }); }
-      function onFocusCell(dIndex, eIndex){ activeCellRef.current = { dIndex, eIndex }; }
-      function moveActive(dx, dy){ const cur = activeCellRef.current || { dIndex:0, eIndex:0 }; const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateList.length-1)); const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, employees.length-1)); activeCellRef.current = { dIndex: ni, eIndex: nj }; const id = `cell-${ni}-${nj}`; const el = document.getElementById(id); if(el) el.focus(); }
-      function openPickerAt(di, ei, anchorEl){
+      const setCellByIndex = useCallback((dIndex, eIndex, value)=>{
+        const d = dateList[dIndex];
+        const emp = employees[eIndex];
+        if(!d || !emp) return;
+        setData(prev=>{
+          const next = { ...prev };
+          const row = { ...(next[d]||{}) };
+          row[emp] = value;
+          next[d] = row;
+          return next;
+        });
+      }, [dateList, employees]);
+      const onFocusCell = useCallback((dIndex, eIndex)=>{ activeCellRef.current = { dIndex, eIndex }; }, []);
+      const dateCount = dateList.length;
+      const empCount = employees.length;
+      const moveActive = useCallback((dx, dy)=>{
+        const cur = activeCellRef.current || { dIndex:0, eIndex:0 };
+        const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateCount-1));
+        const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, empCount-1));
+        activeCellRef.current = { dIndex: ni, eIndex: nj };
+        const id = `cell-${ni}-${nj}`;
+        const el = document.getElementById(id);
+        if(el) el.focus();
+      }, [dateCount, empCount]);
+      const openPickerAt = useCallback((di, ei, anchorEl)=>{
         if(editingLocked) return;
         const el = anchorEl || document.getElementById(`cell-${di}-${ei}`);
         if(!el) return;
@@ -1934,14 +1976,115 @@
           }
         }
         setPicker({ open:true, di, ei, x:left, y:top, placement });
-      }
-      function onKeyDownCell(e, di, ei){ if(e.isComposing) return; if(e.altKey && (e.key==='ArrowDown' || e.key==='Enter')){ e.preventDefault(); openPickerAt(di, ei, e.currentTarget); return; } if(e.key==='Enter'){ e.preventDefault(); moveActive(1,0); } else if(e.key==='ArrowRight'){ e.preventDefault(); moveActive(1,0); } else if(e.key==='ArrowLeft'){ e.preventDefault(); moveActive(-1,0); } else if(e.key==='ArrowDown'){ e.preventDefault(); moveActive(0,1); } else if(e.key==='ArrowUp'){ e.preventDefault(); moveActive(0,-1); } }
+      }, [editingLocked]);
+      const onKeyDownCell = useCallback((e, di, ei)=>{
+        if(e.isComposing) return;
+        if(e.altKey && (e.key==='ArrowDown' || e.key==='Enter')){
+          e.preventDefault();
+          openPickerAt(di, ei, e.currentTarget);
+          return;
+        }
+        if(e.key==='Enter'){
+          e.preventDefault();
+          moveActive(1,0);
+        } else if(e.key==='ArrowRight'){
+          e.preventDefault();
+          moveActive(1,0);
+        } else if(e.key==='ArrowLeft'){
+          e.preventDefault();
+          moveActive(-1,0);
+        } else if(e.key==='ArrowDown'){
+          e.preventDefault();
+          moveActive(0,1);
+        } else if(e.key==='ArrowUp'){
+          e.preventDefault();
+          moveActive(0,-1);
+        }
+      }, [moveActive, openPickerAt]);
+
+      const ScheduleRow = React.memo(function ScheduleRow({
+        day,
+        di,
+        employeesList,
+        rowData,
+        issue,
+        staffingAlerts,
+        editingLocked,
+        shiftColors,
+        onFocusCell,
+        onKeyDownCell,
+        openPickerAt,
+        setCellByIndex
+      }){
+        const dataRow = rowData || EMPTY_ROW;
+        const stats = useMemo(()=>{
+          let total = 0; let white = 0; let mid1 = 0; let mid2 = 0; let night = 0;
+          for(const emp of employeesList){
+            const v = dataRow[emp];
+            if(!v || v==='休') continue;
+            total++;
+            if(v==='白') white++;
+            else if(v==='中1') mid1++;
+            else if(v==='中2') mid2++;
+            else if(v==='夜') night++;
+          }
+          return { total, white, mid1, mid2, night };
+        }, [dataRow, employeesList]);
+        const w = dow(day);
+        const weekend = w===0 || w===6;
+        const weekLabel = WN[w];
+        return (
+          <tr className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
+            <td className="py-1.5 px-3 font-medium text-gray-800 left-sticky" style={{minWidth:'8.5rem'}}>
+              <div className="flex items-center gap-2"><span>{day}</span></div>
+              <div className="text-xs text-gray-500 flex flex-wrap items-center gap-1">
+                <span style={styleForStaffing(stats.total, staffingAlerts.total)}>在岗 {stats.total}</span>
+                <span>（</span>
+                <span style={styleForStaffing(stats.white, staffingAlerts.white)}>白 {stats.white}</span>
+                <span>/</span>
+                <span style={styleForStaffing(stats.mid1, staffingAlerts.mid1)}>中1 {stats.mid1}</span>
+                <span>/</span>
+                <span>中2 {stats.mid2}</span>
+                <span>/</span>
+                <span>夜 {stats.night}</span>
+                <span>）</span>
+              </div>
+            </td>
+            <td className="py-1.5 px-3 text-gray-500 left-sticky-2" style={{minWidth:'6.5rem'}}>周{weekLabel}</td>
+            <td className="py-1.5 px-3 left-sticky-3" style={{minWidth:'9rem'}}>
+              {issue? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
+            </td>
+            {employeesList.map((emp, ei)=>{
+              const value = dataRow[emp] || '';
+              const bg = shiftColors[value] || undefined;
+              return (
+                <td key={emp} className="py-1.5 px-3">
+                  <div className="cell-wrap">
+                    <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
+                      style={{ backgroundColor: bg }} value={value}
+                      disabled={editingLocked}
+                      title={editingLocked? '执行中：只读' : ''}
+                      onFocus={()=> onFocusCell(di, ei)}
+                      onKeyDown={(ev)=> onKeyDownCell(ev, di, ei)}
+                      onCompositionStart={(ev)=>{ ev.target.isComposing = true; }}
+                      onCompositionEnd={(ev)=>{ ev.target.isComposing = false; setCellByIndex(di, ei, ev.currentTarget.value); }}
+                      onChange={ev=> setCellByIndex(di, ei, ev.target.value)}
+                      onDoubleClick={(ev)=>{ if(editingLocked) return; openPickerAt(di, ei, ev.currentTarget); }} placeholder="白/中1/中2/夜/休 或留空" />
+                    <button className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title="选择班次"
+                      onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
+                      <span className="sr-only">打开班次选择器</span>
+                    </button>
+                  </div>
+                </td>
+              );
+            })}
+          </tr>
+        );
+      });
 
       function clearRange(mode='empty'){
         setData(prev=>{ const next={...prev}; for(const d of dateList){ const r={...(next[d]||{})}; for(const e of employees){ r[e] = (mode==='rest')? '休' : ''; } next[d]=r; } return next; });
       }
-
-      const dailyStats = useMemo(()=>{ const m={}; for(const d of dateList){ const row=data[d]||{}; const stat={总:0, 白:0, 中1:0, 中2:0, 夜:0}; for(const e of employees){ const v=row[e]; if(!v || v==='休') continue; stat['总']++; if(v==='白') stat['白']++; else if(v==='中1') stat['中1']++; else if(v==='中2') stat['中2']++; else if(v==='夜') stat['夜']++; } m[d]=stat; } return m; }, [data, dateList, employees]);
 
       const nightIssues = useMemo(()=>{ const issues={}; function inAnyWin(day){ for(const w of nightWindows){ if(!w.s||!w.e) continue; if(day>=w.s && day<=w.e) return true; } return false; } for(const d of dateList){ if(!inAnyWin(d)) continue; const row=data[d]||{}; const vals=Object.values(row); const hasN = vals.includes('夜'); const hasM2 = vals.includes('中2'); let msg=''; if(!hasN && !hasM2) msg='缺夜&中2'; else if(!hasN) msg='缺夜'; else if(!hasM2) msg='缺中2'; if(msg) issues[d]=msg; } return issues; }, [nightWindows, data, dateList]);
 
@@ -2095,56 +2238,23 @@
                     </tr>
                   </thead>
                   <tbody>
-                    {dateList.map((d,di)=> {
-                      const w = dow(d); const weekend=(w===0||w===6);
-                      const row=data[d]||{}; const issue = nightIssues[d]||'';
-                      const stat = dailyStats[d]||{总:0,白:0,中1:0,中2:0,夜:0};
-                      return (
-                        <tr key={d} className={"border-t hover:bg-indigo-50/30 "+(weekend? 'bg-gray-50' : '')}>
-                          <td className={`py-1.5 px-3 font-medium text-gray-800 left-sticky`} style={{minWidth:'8.5rem'}}>
-                            <div className="flex items-center gap-2"><span>{d}</span></div>
-                            <div className="text-xs text-gray-500 flex flex-wrap items-center gap-1">
-                              <span style={styleForStaffing(stat['总'], staffingAlerts.total)}>在岗 {stat['总']}</span>
-                              <span>（</span>
-                              <span style={styleForStaffing(stat['白'], staffingAlerts.white)}>白 {stat['白']}</span>
-                              <span>/</span>
-                              <span style={styleForStaffing(stat['中1'], staffingAlerts.mid1)}>中1 {stat['中1']}</span>
-                              <span>/</span>
-                              <span>中2 {stat['中2']}</span>
-                              <span>/</span>
-                              <span>夜 {stat['夜']}</span>
-                              <span>）</span>
-                            </div>
-                          </td>
-                          <td className="py-1.5 px-3 text-gray-500 left-sticky-2" style={{minWidth:'6.5rem'}}>周{WN[w]}</td>
-                          <td className="py-1.5 px-3 left-sticky-3" style={{minWidth:'9rem'}}>
-                            {issue? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
-                          </td>
-                          {employees.map((e,ei)=> {
-                            const v = (data[d]&&data[d][e])||'';
-                            const bg = shiftColors[v] || undefined;
-                            return (
-                              <td key={e} className="py-1.5 px-3">
-                                <div className="cell-wrap">
-                                  <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
-                                    style={{ backgroundColor: bg }} value={v}
-                                    disabled={editingLocked}
-                                    title={editingLocked? '执行中：只读' : ''}
-                                    onFocus={()=>onFocusCell(di,ei)} onKeyDown={(ev)=> onKeyDownCell(ev, di, ei)}
-                                    onCompositionStart={(ev)=>{ ev.target.isComposing = true; }}
-                                    onCompositionEnd={(ev)=>{ ev.target.isComposing = false; setCellByIndex(di, ei, ev.currentTarget.value); }}
-                                    onChange={ev=> setCellByIndex(di, ei, ev.target.value)} onDoubleClick={(ev)=>{ if(editingLocked) return; openPickerAt(di, ei, ev.currentTarget); }} placeholder="白/中1/中2/夜/休 或留空" />
-                                  <button className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title="选择班次"
-                                    onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
-                                    <span className="sr-only">打开班次选择器</span>
-                                  </button>
-                                </div>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })}
+                    {dateList.map((d,di)=> (
+                      <ScheduleRow
+                        key={d}
+                        day={d}
+                        di={di}
+                        employeesList={employees}
+                        rowData={data[d] || EMPTY_ROW}
+                        issue={nightIssues[d] || ''}
+                        staffingAlerts={staffingAlerts}
+                        editingLocked={editingLocked}
+                        shiftColors={shiftColors}
+                        onFocusCell={onFocusCell}
+                        onKeyDownCell={onKeyDownCell}
+                        openPickerAt={openPickerAt}
+                        setCellByIndex={setCellByIndex}
+                      />
+                    ))}
                   </tbody>
                 </table>
                 <datalist id="shift-options">
@@ -2174,7 +2284,7 @@
                 <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} onClick={()=> withStay(()=> setBatchChecked(prev=>{ const next={...prev}; filtered.forEach(n=> { next[n]=false; }); return next; }))}>清空</button>
               </div>
             </div>
-            <div ref={listRef} className="max-h-64 overflow-auto divide-y">
+            <div ref={listRef} className="divide-y">
               {filtered.map(name=> (
                 <label key={name} className="flex items-center gap-2 py-1">
                   <input type="checkbox" disabled={editingLocked} checked={!!batchChecked[name]} onChange={()=> withStay(()=> setBatchChecked(p=>({ ...p, [name]: !p[name] })))} />
@@ -2206,7 +2316,7 @@
                 <button className={`px-2 py-1 rounded border text-xs ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked || filtered.length===0} onClick={()=> withStay(()=> setAlbumSelected(prev=>{ const next={...prev}; filtered.forEach(n=>{ next[n] = false; }); return next; }))}>清空</button>
               </div>
             </div>
-            <div ref={listRef} className="max-h-64 overflow-auto divide-y">
+              <div ref={listRef} className="divide-y">
               {filtered.map(name=> (
                 <label key={name} className="flex items-center gap-2 py-1 text-sm">
                   <input type="checkbox" checked={!!albumSelected[name]} disabled={editingLocked} onChange={()=> withStay(()=> setAlbumSelected(prev=> ({ ...prev, [name]: !prev[name] })))} />
@@ -2573,7 +2683,6 @@
         <Section title="专辑审核自动排班" right={<span className="text-xs text-gray-500">白班 1 人 + 中1 1 人，时长均衡的审核计划</span>}>
           <div className="grid grid-cols-1 xl:grid-cols-4 gap-4 items-start">
             <div className="space-y-4">
-              <AlbumEmployeeChecklist/>
               <div className="rounded-2xl border bg-gradient-to-br from-white via-white to-amber-50/60 p-4 space-y-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-amber-700"><Icon name="magic" className="w-4 h-4"/>自动排班参数</div>
                 <div className="grid grid-cols-1 gap-2 text-sm text-gray-600">
@@ -2590,6 +2699,7 @@
                 {albumAutoNote && <div className="text-xs text-indigo-600 bg-indigo-50/80 border border-indigo-100 rounded-xl px-3 py-2">{albumAutoNote}</div>}
                 <div className="text-xs text-gray-500">提示：参数调整后可重新生成；排班结果支持右侧表格内手动微调。</div>
               </div>
+              <AlbumEmployeeChecklist/>
             </div>
 
             <div className="space-y-4 xl:col-span-3">
@@ -3002,44 +3112,87 @@
           });
         }, [restCycles, monthSpans]);
 
-        const albumEntriesInRange = useMemo(()=> albumHistory.filter(entry=>{
-          if(!entry || !entry.range) return false;
-          const rs = entry.range.start;
-          const re = entry.range.end;
-          if(!rs || !re) return false;
-          return !(re < cur.s || rs > cur.e);
-        }), [albumHistory, cur.s, cur.e]);
+        const albumEntriesSorted = useMemo(()=>{
+          const parseStamp = (entry)=>{
+            const raw = entry?.savedAt || entry?.createdAt || entry?.updatedAt || '';
+            const ts = raw ? Date.parse(raw) : 0;
+            return Number.isFinite(ts) ? ts : 0;
+          };
+          return albumHistory.slice().sort((a,b)=>{
+            const diff = parseStamp(b) - parseStamp(a);
+            if(diff !== 0) return diff;
+            const keyA = albumEntryKey(a);
+            const keyB = albumEntryKey(b);
+            return keyB.localeCompare(keyA);
+          });
+        }, [albumHistory]);
+        const albumAggregate = useMemo(()=>{
+          const dayAssignment = {};
+          const entryActiveCount = {};
+          albumEntriesSorted.forEach((entry, idx)=>{
+            const key = albumEntryKey(entry, idx);
+            const assignments = entry?.assignments || {};
+            const whiteHour = Number(entry?.whiteHour) || 0;
+            const midHour = Number(entry?.midHour) || 0;
+            Object.entries(assignments).forEach(([day, info])=>{
+              if(dayAssignment[day]) return;
+              dayAssignment[day] = {
+                white: info?.white || '',
+                mid: info?.mid || '',
+                whiteHour,
+                midHour,
+                key
+              };
+              entryActiveCount[key] = (entryActiveCount[key] || 0) + 1;
+            });
+          });
+          return { dayAssignment, entryActiveCount };
+        }, [albumEntriesSorted]);
+        const albumEntriesInRange = useMemo(()=>{
+          if(!cur?.s || !cur?.e) return [];
+          const result = [];
+          albumEntriesSorted.forEach((entry, idx)=>{
+            const assignments = entry?.assignments || {};
+            if(!assignments || !Object.keys(assignments).length) return;
+            const key = albumEntryKey(entry, idx);
+            const activeCount = albumAggregate.entryActiveCount[key] || 0;
+            if(activeCount === 0) return;
+            for(const day of Object.keys(assignments)){
+              if(day < cur.s || day > cur.e) continue;
+              if(albumAggregate.dayAssignment[day]?.key === key){
+                result.push({ entry, key, activeCount });
+                break;
+              }
+            }
+          });
+          return result;
+        }, [albumEntriesSorted, albumAggregate, cur?.s, cur?.e]);
         const albumAnalysis = useMemo(()=>{
           const perEmp = {};
           const employeeSet = new Set();
           const summary = { batches: albumEntriesInRange.length, whiteDays:0, midDays:0, whiteHours:0, midHours:0, totalHours:0 };
-          albumEntriesInRange.forEach(entry=>{
-            const assignments = entry.assignments || {};
-            const whiteHour = Number(entry.whiteHour)||0;
-            const midHour = Number(entry.midHour)||0;
-            Object.entries(assignments).forEach(([day, info])=>{
-              if(day < cur.s || day > cur.e) return;
-              const whiteName = info?.white || '';
-              const midName = info?.mid || '';
-              if(whiteName){
-                if(!perEmp[whiteName]) perEmp[whiteName] = { whiteDays:0, whiteHours:0, midDays:0, midHours:0 };
-                perEmp[whiteName].whiteDays += 1;
-                perEmp[whiteName].whiteHours += whiteHour;
-                summary.whiteDays += 1;
-                summary.whiteHours += whiteHour;
-                summary.totalHours += whiteHour;
-                employeeSet.add(whiteName);
-              }
-              if(midName){
-                if(!perEmp[midName]) perEmp[midName] = { whiteDays:0, whiteHours:0, midDays:0, midHours:0 };
-                perEmp[midName].midDays += 1;
-                perEmp[midName].midHours += midHour;
-                summary.midDays += 1;
-                summary.midHours += midHour;
-                summary.totalHours += midHour;
-                employeeSet.add(midName);
-              }
-            });
+          Object.entries(albumAggregate.dayAssignment).forEach(([day, detail])=>{
+            if(!detail) return;
+            if(day < cur.s || day > cur.e) return;
+            const { white, mid, whiteHour, midHour } = detail;
+            if(white){
+              if(!perEmp[white]) perEmp[white] = { whiteDays:0, whiteHours:0, midDays:0, midHours:0 };
+              perEmp[white].whiteDays += 1;
+              perEmp[white].whiteHours += whiteHour;
+              summary.whiteDays += 1;
+              summary.whiteHours += whiteHour;
+              summary.totalHours += whiteHour;
+              employeeSet.add(white);
+            }
+            if(mid){
+              if(!perEmp[mid]) perEmp[mid] = { whiteDays:0, whiteHours:0, midDays:0, midHours:0 };
+              perEmp[mid].midDays += 1;
+              perEmp[mid].midHours += midHour;
+              summary.midDays += 1;
+              summary.midHours += midHour;
+              summary.totalHours += midHour;
+              employeeSet.add(mid);
+            }
           });
           const rows = Object.entries(perEmp).map(([emp,val])=> ({
             emp,
@@ -3062,10 +3215,21 @@
               avgHoursPerEmployee: employeeCount? summary.totalHours / employeeCount : 0
             }
           };
-        }, [albumEntriesInRange, cur.s, cur.e]);
-        const albumHistoryForView = useMemo(()=> albumEntriesInRange.slice().sort((a,b)=>{
-          return new Date(b?.savedAt || 0) - new Date(a?.savedAt || 0);
-        }), [albumEntriesInRange]);
+        }, [albumAggregate, albumEntriesInRange.length, cur.s, cur.e]);
+        const albumHistoryForView = useMemo(()=>{
+          if(!cur?.s || !cur?.e) return [];
+          const result = [];
+          albumEntriesSorted.forEach((entry, idx)=>{
+            const assignments = entry?.assignments || {};
+            if(!assignments || !Object.keys(assignments).length) return;
+            const hasOverlap = Object.keys(assignments).some(day=> day>=cur.s && day<=cur.e);
+            if(!hasOverlap) return;
+            const key = albumEntryKey(entry, idx);
+            const activeCount = albumAggregate.entryActiveCount[key] || 0;
+            result.push({ entry, key, activeCount });
+          });
+          return result;
+        }, [albumEntriesSorted, albumAggregate, cur?.s, cur?.e]);
         const albumSummary = albumAnalysis.summary || { batches:0, whiteDays:0, midDays:0, whiteHours:0, midHours:0, totalHours:0, employeeCount:0, avgTotalHoursPerBatch:0, avgWhiteHoursPerBatch:0, avgMidHoursPerBatch:0, avgHoursPerEmployee:0 };
         const albumRows = albumAnalysis.rows || [];
 
@@ -3354,16 +3518,18 @@
                     <div className="text-sm text-gray-500">当前统计周期内暂无历史排班，可在专辑审核自动排班页确认后查看。</div>
                   ) : (
                     <div className="space-y-4">
-                      {albumHistoryForView.map(entry=> {
-                        const days = Object.keys(entry.assignments||{}).filter(day=> day>=cur.s && day<=cur.e).sort();
-                        const savedAt = entry.savedAt ? new Date(entry.savedAt).toLocaleString() : '—';
-                        const totals = entry.totals || {};
-                        const coverage = entry.coverage || {};
+                      {albumHistoryForView.map(({ entry, key, activeCount })=> {
+                        const assignments = entry?.assignments || {};
+                        const days = Object.keys(assignments).filter(day=> day>=cur.s && day<=cur.e && albumAggregate.dayAssignment[day]?.key === key).sort();
+                        const savedAt = entry?.savedAt ? new Date(entry.savedAt).toLocaleString() : '—';
+                        const totals = entry?.totals || {};
+                        const coverage = entry?.coverage || {};
+                        const isCovered = days.length===0;
                         return (
-                          <div key={entry.id} className="rounded-2xl border bg-white overflow-hidden shadow-sm">
+                          <div key={key} className="rounded-2xl border bg-white overflow-hidden shadow-sm">
                             <div className="px-4 py-3 border-b bg-gray-50 text-sm font-medium text-gray-700 flex flex-wrap items-center justify-between gap-2">
                               <div className="flex flex-col sm:flex-row sm:items-center sm:gap-3">
-                                <span>{entry.range?.start} ~ {entry.range?.end}</span>
+                                <span>{entry?.range?.start} ~ {entry?.range?.end}</span>
                                 <span className="text-xs text-gray-400">保存于 {savedAt}</span>
                               </div>
                               <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
@@ -3372,10 +3538,15 @@
                                 <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">总时长 {(Number(totals.totalHours)||0).toFixed(2)} 小时</span>
                                 <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">时长差值 {(Number(entry.diff)||0).toFixed(2)} 小时</span>
                                 <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-700">覆盖 {coverage.totalDays||0} 天</span>
+                                {isCovered ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">已被后续排班覆盖</span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">当前生效 {days.length} 天</span>
+                                )}
                               </div>
                             </div>
                             {days.length===0 ? (
-                              <div className="p-4 text-xs text-gray-500">当前统计周期内与该记录无重叠日期。</div>
+                              <div className="p-4 text-xs text-gray-500">该记录在当前统计周期内已被后续排班覆盖。</div>
                             ) : (
                               <div className="overflow-auto">
                                 <table className="min-w-[600px] w-full text-sm">
@@ -3389,10 +3560,10 @@
                                   </thead>
                                   <tbody>
                                     {days.map(day=>{
-                                      const info = entry.assignments?.[day] || {};
+                                      const info = assignments?.[day] || {};
                                       const wk = WN[new Date(day).getDay()];
                                       return (
-                                        <tr key={`${entry.id}-${day}`} className="border-t hover:bg-indigo-50/20">
+                                        <tr key={`${key}-${day}`} className="border-t hover:bg-indigo-50/20">
                                           <td className="py-1.5 px-3 font-medium text-gray-700">{day}</td>
                                           <td className="py-1.5 px-3 text-gray-500">周{wk}</td>
                                           <td className="py-1.5 px-3"><span className={`inline-block px-2 py-0.5 rounded-full text-xs ${info.white ? 'bg-white border border-gray-200 text-gray-700' : 'bg-rose-50 border border-rose-200 text-rose-600'}`}>{info.white || '未分配'}</span></td>
@@ -3417,21 +3588,28 @@
       })();
 
       const ViewHistory = (
-        <Section title={`历史版本（${teamDisplayName}）`} right={<button onClick={loadVersions} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(editingLocked || versionsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={editingLocked || versionsLoading}>
-          {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新列表'}
-        </button>}>
-          {versionsLoading && versions.length>0 && (
+        <Section title={`历史版本（${teamDisplayName}）`} right={<div className="flex items-center gap-3">
+          <label className="inline-flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" className="rounded" checked={showAutoSaves} onChange={e=> setShowAutoSaves(e.target.checked)} />显示自动保存</label>
+          <button onClick={loadVersions} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(editingLocked || versionsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={editingLocked || versionsLoading}>
+            {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新列表'}
+          </button>
+        </div>}>
+          {versionsLoading && filteredVersions.length>0 && (
             <div className="flex items-center gap-2 text-xs text-gray-500 mb-3">
               <Spinner className="w-4 h-4 text-indigo-500" />
               <span>正在刷新历史版本，请稍候…</span>
             </div>
           )}
-          {versionsLoading && versions.length===0 ? (
+          {versionsLoading && filteredVersions.length===0 ? (
             <div className="text-sm text-gray-500">正在加载历史版本…</div>
-          ) : versions.length===0 ? (
-            <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无历史版本，请在“设置 / 导出”页保存新版本或稍后刷新。</p>
+          ) : filteredVersions.length===0 ? (
+            versions.length>0 && !showAutoSaves && versions.some(v=> (v?.created_by_name || v?.created_by || '').trim()==='自动保存') ? (
+              <p className="text-sm text-gray-500">当前筛选仅隐藏了自动保存记录，如需查看请勾选“显示自动保存”。</p>
+            ) : (
+              <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无历史版本，请在“设置 / 导出”页保存新版本或稍后刷新。</p>
+            )
           ) : (
-            <div className="overflow-auto max-h-64">
+            <div className="overflow-auto rounded-2xl border" style={{ maxHeight: 'min(70vh, calc(100vh - 240px))' }}>
               <table className="text-sm w-full min-w-[780px]">
                 <thead className="bg-gray-50 text-gray-500">
                   <tr>
@@ -3445,12 +3623,14 @@
                   </tr>
                 </thead>
                 <tbody>
-                  {versions.map(v=> {
+                  {filteredVersions.map(v=> {
                     const name = v.note || v.name || '';
                     const remark = v.remark || v.description || '';
                     const teamName = v.team_name || v.teamName || teamDisplayName;
                     const createdAt = v.created_at || v.createdAt || '—';
-                    const operator = v.created_by_name || v.created_by || '管理员';
+                    const operatorRaw = v.created_by_name || v.created_by || '管理员';
+                    const operator = operatorRaw || '管理员';
+                    const isAuto = (operatorRaw || '').trim() === '自动保存';
                     const deleting = versionDeletingId === v.id;
                     return (
                       <tr key={v.id} className="border-t hover:bg-gray-50">
@@ -3460,7 +3640,10 @@
                         <td className="py-1 px-3 text-gray-600">{teamName}</td>
                         <td className="py-1 px-3 text-gray-600">{v.id}</td>
                         <td className="py-1 px-3 text-gray-600">{createdAt}</td>
-                        <td className="py-1 px-3 text-gray-600">{operator}</td>
+                        <td className="py-1 px-3 text-gray-600">
+                          <span>{operator}</span>
+                          {isAuto && <span className="ml-2 inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-500">自动保存</span>}
+                        </td>
                         <td className="py-1 px-3 text-gray-600">{remark || '—'}</td>
                         <td className="py-1 px-3">
                           <div className="flex items-center gap-3">
