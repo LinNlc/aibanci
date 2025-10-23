@@ -42,7 +42,6 @@ function db(): PDO {
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
   ]);
   $pdo->exec('PRAGMA journal_mode = WAL;');
-  $pdo->exec('PRAGMA synchronous = NORMAL;');
   $pdo->exec('PRAGMA busy_timeout = 5000;');
 
   // 只有排班版本表（无 users）
@@ -65,83 +64,15 @@ function db(): PDO {
   } catch (Throwable $e) {
     // 已有 payload 列时忽略
   }
-  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_sv_team_range ON schedule_versions(team, view_start, view_end, id);");
+$pdo->exec("CREATE INDEX IF NOT EXISTS idx_sv_team_range ON schedule_versions(team, view_start, view_end, id);");
 
-  $pdo->exec("
-    CREATE TABLE IF NOT EXISTS team_states (
-      team TEXT PRIMARY KEY,
-      payload TEXT NOT NULL,
-      version INTEGER NOT NULL DEFAULT 1,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-      updated_by TEXT,
-      last_backup_at TEXT
-    );
-  ");
-
-  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_team_states_updated_at ON team_states(updated_at);");
-
-  $pdo->exec("
-    CREATE TABLE IF NOT EXISTS team_activity_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      team TEXT NOT NULL,
-      operator TEXT,
-      action TEXT NOT NULL,
-      detail TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-    );
-  ");
-
-  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_team_logs_team_created_at ON team_activity_logs(team, created_at DESC, id DESC);");
-
-  $pdo->exec("
-    CREATE TABLE IF NOT EXISTS org_config (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      payload TEXT NOT NULL,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-    );
+$pdo->exec("
+  CREATE TABLE IF NOT EXISTS org_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    payload TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  );
 ");
-
-  $pdo->exec("
-    CREATE TABLE IF NOT EXISTS schedule_cells (
-      team TEXT NOT NULL,
-      day  TEXT NOT NULL,
-      emp  TEXT NOT NULL,
-      value TEXT NOT NULL,
-      version INTEGER NOT NULL,
-      updated_at TEXT NOT NULL,
-      updated_by TEXT,
-      PRIMARY KEY(team, day, emp)
-    );
-  ");
-  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_schedule_cells_team_day ON schedule_cells(team, day);");
-
-  $pdo->exec("
-    CREATE TABLE IF NOT EXISTS schedule_ops (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      team TEXT NOT NULL,
-      day  TEXT NOT NULL,
-      emp  TEXT NOT NULL,
-      from_value TEXT,
-      to_value   TEXT,
-      client_id  TEXT,
-      client_seq INTEGER,
-      server_version INTEGER NOT NULL UNIQUE,
-      base_cell_version INTEGER,
-      cell_version INTEGER NOT NULL,
-      conflict INTEGER NOT NULL DEFAULT 0,
-      actor TEXT,
-      created_at TEXT NOT NULL
-    );
-  ");
-  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_schedule_ops_team_version ON schedule_ops(team, server_version);");
-  $pdo->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_ops_client ON schedule_ops(team, client_id, client_seq);");
-
-  $pdo->exec("
-    CREATE TABLE IF NOT EXISTS live_versions (
-      team TEXT PRIMARY KEY,
-      version INTEGER NOT NULL
-    );
-  ");
   return $pdo;
 }
 
@@ -169,76 +100,9 @@ function ymd_range(string $start, string $end): array {
   for ($t = $s; $t <= $e; $t += 86400) $out[] = date('Y-m-d', $t);
   return $out;
 }
-
-function is_valid_ymd(string $value): bool {
-  return (bool)preg_match('/^\d{4}-\d{2}-\d{2}$/', $value);
-}
 function cn_week(string $ymd): string {
   $w = date('w', strtotime($ymd)); // 0..6
   return ['日','一','二','三','四','五','六'][$w] ?? '';
-}
-
-function now_local(): string {
-  return date('Y-m-d H:i:s');
-}
-
-function fetch_org_config_payload(PDO $pdo, bool $forceReload = false): array {
-  static $cached = null;
-  if ($forceReload) {
-    $cached = null;
-  }
-  if ($cached !== null) {
-    return $cached;
-  }
-  $stmt = $pdo->query('SELECT payload FROM org_config WHERE id = 1 LIMIT 1');
-  $row = $stmt->fetch();
-  $payload = [];
-  if ($row && isset($row['payload'])) {
-    $decoded = decode_json_assoc($row['payload']);
-    if ($decoded) {
-      $payload = $decoded;
-    }
-  }
-  $cached = $payload;
-  return $payload;
-}
-
-function backup_settings(PDO $pdo): array {
-  $config = fetch_org_config_payload($pdo);
-  $backup = [];
-  if (isset($config['backup']) && is_array($config['backup'])) {
-    $backup = $config['backup'];
-  }
-  $interval = 10;
-  if (isset($backup['intervalMinutes'])) {
-    $interval = (int)$backup['intervalMinutes'];
-  } elseif (isset($backup['interval_minutes'])) {
-    $interval = (int)$backup['interval_minutes'];
-  }
-  if ($interval < 1) $interval = 10;
-
-  $limit = 50;
-  if (isset($backup['limit'])) {
-    $limit = (int)$backup['limit'];
-  } elseif (isset($backup['maxCount'])) {
-    $limit = (int)$backup['maxCount'];
-  }
-  if ($limit < 1) $limit = 50;
-
-  return [
-    'interval' => $interval,
-    'limit' => $limit,
-  ];
-}
-
-function append_team_log(PDO $pdo, string $team, string $operator, string $action, string $detail = ''): void {
-  $stmt = $pdo->prepare('INSERT INTO team_activity_logs(team, operator, action, detail) VALUES(?,?,?,?)');
-  $stmt->execute([
-    $team,
-    $operator,
-    $action,
-    $detail,
-  ]);
 }
 
 function send_schedule_export(array $header, array $rows, string $filenameBase): void {
@@ -476,286 +340,6 @@ function normalize_import_date($value): ?string {
   return null;
 }
 
-function realtime_enabled(): bool {
-  static $cached = null;
-  if ($cached !== null) {
-    return $cached;
-  }
-  $env = getenv('REALTIME_ENABLED');
-  if ($env === false || $env === '') {
-    $cached = true;
-    return $cached;
-  }
-  $env = strtolower(trim((string)$env));
-  $cached = !in_array($env, ['0', 'false', 'no', 'off'], true);
-  return $cached;
-}
-
-function current_server_time(): string {
-  return gmdate('c');
-}
-
-function fetch_live_version(PDO $pdo, string $team): int {
-  $stmt = $pdo->prepare('SELECT version FROM live_versions WHERE team=? LIMIT 1');
-  $stmt->execute([$team]);
-  $row = $stmt->fetch();
-  return $row ? (int)$row['version'] : 0;
-}
-
-function persist_live_version(PDO $pdo, string $team, int $version): void {
-  $stmt = $pdo->prepare('UPDATE live_versions SET version=? WHERE team=?');
-  $stmt->execute([$version, $team]);
-  if ($stmt->rowCount() === 0) {
-    $insert = $pdo->prepare('INSERT INTO live_versions(team, version) VALUES(?, ?)');
-    $insert->execute([$team, $version]);
-  }
-}
-
-function begin_immediate_transaction(PDO $pdo): void {
-  if ($pdo->inTransaction()) {
-    return;
-  }
-  $pdo->exec('BEGIN IMMEDIATE TRANSACTION');
-}
-
-function aggregate_schedule_cells(PDO $pdo, string $team, string $start, string $end, array $preferredEmployees = []): array {
-  $dates = ymd_range($start, $end);
-  $data = [];
-  $versions = [];
-  $meta = [];
-  foreach ($dates as $day) {
-    $data[$day] = [];
-    $versions[$day] = [];
-    $meta[$day] = [];
-  }
-  $stmt = $pdo->prepare('SELECT day, emp, value, version, updated_at, updated_by FROM schedule_cells WHERE team=? AND day BETWEEN ? AND ? ORDER BY day ASC, emp ASC');
-  $stmt->execute([$team, $start, $end]);
-  $employeesSet = [];
-  $hasRows = false;
-  while ($row = $stmt->fetch()) {
-    $day = $row['day'];
-    $emp = $row['emp'];
-    if (!is_string($day) || !is_string($emp)) continue;
-    if (!isset($data[$day])) {
-      $data[$day] = [];
-      $versions[$day] = [];
-      $meta[$day] = [];
-    }
-    $value = (string)($row['value'] ?? '');
-    $data[$day][$emp] = $value;
-    $versions[$day][$emp] = isset($row['version']) ? (int)$row['version'] : 0;
-    $meta[$day][$emp] = [
-      'updated_at' => $row['updated_at'] ?? null,
-      'updated_by' => $row['updated_by'] ?? null,
-    ];
-    $employeesSet[$emp] = true;
-    $hasRows = true;
-  }
-  $orderedEmployees = [];
-  foreach ($preferredEmployees as $emp) {
-    if (!is_string($emp)) continue;
-    if (isset($employeesSet[$emp])) {
-      $orderedEmployees[] = $emp;
-      unset($employeesSet[$emp]);
-    } else {
-      $orderedEmployees[] = $emp;
-    }
-  }
-  foreach ($employeesSet as $emp => $_) {
-    if (!in_array($emp, $orderedEmployees, true)) {
-      $orderedEmployees[] = $emp;
-    }
-  }
-  return [
-    'data' => $data,
-    'versions' => $versions,
-    'meta' => $meta,
-    'employees' => $orderedEmployees,
-    'hasData' => $hasRows,
-  ];
-}
-
-class SnapshotConflictException extends RuntimeException {
-  private int $latestVersion;
-
-  public function __construct(string $message, int $latestVersion) {
-    parent::__construct($message, 409);
-    $this->latestVersion = $latestVersion;
-  }
-
-  public function getLatestVersion(): int {
-    return $this->latestVersion;
-  }
-}
-
-function persist_snapshot(PDO $pdo, array $params): array {
-  $team = (string)($params['team'] ?? '');
-  $viewStart = (string)($params['viewStart'] ?? '');
-  $viewEnd = (string)($params['viewEnd'] ?? '');
-  if ($team === '' || !is_valid_ymd($viewStart) || !is_valid_ymd($viewEnd) || $viewStart > $viewEnd) {
-    throw new InvalidArgumentException('无法保存：快照参数不合法');
-  }
-
-  $employees = $params['employees'] ?? [];
-  if (!is_array($employees)) {
-    $employees = [];
-  }
-  $employees = array_values(array_map(static function ($item) {
-    return is_string($item) ? $item : (string)$item;
-  }, $employees));
-
-  $data = $params['data'] ?? [];
-  if (!is_array($data)) {
-    $data = [];
-  }
-
-  $note = (string)($params['note'] ?? '');
-  $operator = trim((string)($params['operator'] ?? '管理员')) ?: '管理员';
-  $baseVersionId = $params['baseVersionId'] ?? null;
-
-  $snapshot = [
-    'team' => $team,
-    'viewStart' => $viewStart,
-    'viewEnd' => $viewEnd,
-    'start' => $params['start'] ?? $viewStart,
-    'end' => $params['end'] ?? $viewEnd,
-    'employees' => $employees,
-    'data' => $data,
-    'note' => $note,
-  ];
-
-  $extra = $params['extra'] ?? [];
-  if (is_array($extra)) {
-    foreach ($extra as $key => $value) {
-      $snapshot[$key] = $value;
-    }
-  }
-
-  if (array_key_exists('cellVersions', $params)) {
-    $snapshot['cellVersions'] = $params['cellVersions'];
-  }
-  if (array_key_exists('cellMeta', $params)) {
-    $snapshot['cellMeta'] = $params['cellMeta'];
-  }
-
-  $now = now_local();
-  $manageTransaction = !$pdo->inTransaction();
-  if ($manageTransaction) {
-    $pdo->beginTransaction();
-  }
-
-  try {
-    $stmt = $pdo->prepare('SELECT version, last_backup_at FROM team_states WHERE team=? LIMIT 1');
-    $stmt->execute([$team]);
-    $stateRow = $stmt->fetch();
-    $currentVersion = $stateRow ? (int)$stateRow['version'] : null;
-    $lastBackupAt = $stateRow['last_backup_at'] ?? null;
-
-    if ($currentVersion !== null && $baseVersionId !== null) {
-      $baseInt = (int)$baseVersionId;
-      if ($baseInt < $currentVersion) {
-        throw new SnapshotConflictException('保存冲突：已有新版本', $currentVersion);
-      }
-      if ($baseInt > $currentVersion) {
-        throw new SnapshotConflictException('保存冲突：版本号无效', $currentVersion);
-      }
-    }
-
-    $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE);
-    if ($snapshotJson === false) {
-      $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
-    }
-
-    $employeesJson = json_encode($employees, JSON_UNESCAPED_UNICODE);
-    if ($employeesJson === false) {
-      $employeesJson = json_encode($employees, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '[]';
-    }
-
-    $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE);
-    if ($dataJson === false) {
-      $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
-    }
-
-    $newVersion = ($currentVersion ?? 0) + 1;
-    if ($currentVersion === null) {
-      $insert = $pdo->prepare('INSERT INTO team_states(team, payload, version, updated_at, updated_by, last_backup_at) VALUES(?,?,?,?,?,NULL)');
-      $insert->execute([$team, $snapshotJson, $newVersion, $now, $operator]);
-    } else {
-      $update = $pdo->prepare('UPDATE team_states SET payload=?, version=?, updated_at=?, updated_by=? WHERE team=?');
-      $update->execute([$snapshotJson, $newVersion, $now, $operator, $team]);
-    }
-
-    $settings = backup_settings($pdo);
-    $intervalMinutes = max(1, (int)($settings['interval'] ?? 10));
-    $limitCount = max(1, (int)($settings['limit'] ?? 50));
-
-    $shouldBackup = false;
-    if (!$lastBackupAt) {
-      $shouldBackup = true;
-    } else {
-      $lastTs = strtotime((string)$lastBackupAt);
-      if ($lastTs === false) {
-        $shouldBackup = true;
-      } else {
-        $shouldBackup = (strtotime($now) - $lastTs) >= ($intervalMinutes * 60);
-      }
-    }
-
-    $backupCreatedAt = $lastBackupAt;
-    if ($shouldBackup) {
-      $stmt = $pdo->prepare(
-        'INSERT INTO schedule_versions(team, view_start, view_end, employees, data, note, created_by_name, payload) VALUES(?,?,?,?,?,?,?,?)'
-      );
-      $stmt->execute([
-        $team,
-        $viewStart,
-        $viewEnd,
-        $employeesJson,
-        $dataJson,
-        $note !== '' ? $note : '自动备份',
-        $operator,
-        $snapshotJson,
-      ]);
-      $backupCreatedAt = $now;
-
-      if ($limitCount > 0) {
-        $listStmt = $pdo->prepare('SELECT id FROM schedule_versions WHERE team=? ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?');
-        $listStmt->execute([$team, $limitCount]);
-        $toDelete = $listStmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
-        if ($toDelete) {
-          $placeholders = implode(',', array_fill(0, count($toDelete), '?'));
-          $del = $pdo->prepare("DELETE FROM schedule_versions WHERE id IN ($placeholders)");
-          $del->execute($toDelete);
-        }
-      }
-
-      $markBackup = $pdo->prepare('UPDATE team_states SET last_backup_at=? WHERE team=?');
-      $markBackup->execute([$backupCreatedAt, $team]);
-    }
-
-    $summary = sprintf('更新排班：%s ~ %s，人员 %d 名', $viewStart, $viewEnd, count($employees));
-    if ($note !== '') {
-      $summary .= '，备注：' . $note;
-    }
-    append_team_log($pdo, $team, $operator, 'update_schedule', $summary);
-
-    if ($manageTransaction) {
-      $pdo->commit();
-    }
-
-    return [
-      'newVersion' => $newVersion,
-      'updatedAt' => $now,
-      'lastBackupAt' => $backupCreatedAt,
-    ];
-  } catch (Throwable $e) {
-    if ($manageTransaction && $pdo->inTransaction()) {
-      $pdo->rollBack();
-    }
-    throw $e;
-  }
-}
-
 function read_schedule_rows(string $file): array {
   $rows = [];
   $autoload = __DIR__ . '/vendor/autoload.php';
@@ -907,218 +491,6 @@ switch (true) {
   case $method === 'POST' && $path === '/logout':
     send_json(['ok' => true]);
 
-  case $method === 'POST' && $path === '/ops':
-    if (!realtime_enabled()) {
-      send_error('实时协作未启用', 400);
-    }
-    $in = json_input();
-    $team = (string)($in['team'] ?? '');
-    $opsInput = $in['ops'] ?? [];
-    $actor = trim((string)($in['actor'] ?? ''));
-    if (!$team || !is_array($opsInput) || !$opsInput) {
-      send_error('参数不合法', 400);
-    }
-    $pdo = db();
-    $useRealtime = realtime_enabled();
-    begin_immediate_transaction($pdo);
-    try {
-      $liveVersion = fetch_live_version($pdo, $team);
-      $results = [];
-      $selectCell = $pdo->prepare('SELECT value, version FROM schedule_cells WHERE team=? AND day=? AND emp=? LIMIT 1');
-      $upsertCell = $pdo->prepare('INSERT INTO schedule_cells(team, day, emp, value, version, updated_at, updated_by) VALUES(?,?,?,?,?,?,?) ON CONFLICT(team, day, emp) DO UPDATE SET value=excluded.value, version=excluded.version, updated_at=excluded.updated_at, updated_by=excluded.updated_by');
-      $insertOp = $pdo->prepare('INSERT INTO schedule_ops(team, day, emp, from_value, to_value, client_id, client_seq, server_version, base_cell_version, cell_version, conflict, actor, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)');
-      $selectDuplicate = $pdo->prepare('SELECT day, emp, from_value, to_value, client_id, client_seq, server_version, base_cell_version, cell_version, conflict, actor, created_at FROM schedule_ops WHERE team=? AND client_id=? AND client_seq=? LIMIT 1');
-      foreach ($opsInput as $item) {
-        if (!is_array($item)) continue;
-        $day = (string)($item['day'] ?? '');
-        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $day)) {
-          continue;
-        }
-        $empRaw = (string)($item['emp'] ?? '');
-        $emp = trim($empRaw);
-        if ($emp === '') {
-          continue;
-        }
-        $empLength = function_exists('mb_strlen') ? mb_strlen($emp) : strlen($emp);
-        if ($empLength > 100) {
-          if (function_exists('mb_substr')) {
-            $emp = mb_substr($emp, 0, 100);
-          } else {
-            $emp = substr($emp, 0, 100);
-          }
-        }
-        $clientId = trim((string)($item['clientId'] ?? ''));
-        if ($clientId !== '') {
-          $clientIdLength = function_exists('mb_strlen') ? mb_strlen($clientId) : strlen($clientId);
-          if ($clientIdLength > 120) {
-            if (function_exists('mb_substr')) {
-              $clientId = mb_substr($clientId, 0, 120);
-            } else {
-              $clientId = substr($clientId, 0, 120);
-            }
-          }
-        }
-        $clientSeqRaw = $item['clientSeq'] ?? null;
-        $clientSeq = is_numeric($clientSeqRaw) ? (int)$clientSeqRaw : null;
-        if ($clientId === '' || $clientSeq === null) {
-          continue;
-        }
-        $dupParams = [$team, $clientId, $clientSeq];
-        $selectDuplicate->execute($dupParams);
-        $dupRow = $selectDuplicate->fetch();
-        if ($dupRow) {
-          $dupVersion = isset($dupRow['server_version']) ? (int)$dupRow['server_version'] : 0;
-          if ($dupVersion > $liveVersion) {
-            $liveVersion = $dupVersion;
-          }
-          $results[] = [
-            'day' => $dupRow['day'],
-            'emp' => $dupRow['emp'],
-            'value' => $dupRow['to_value'] ?? '',
-            'serverVersion' => $dupVersion,
-            'appliedCellVersion' => isset($dupRow['cell_version']) ? (int)$dupRow['cell_version'] : null,
-            'conflict' => !empty($dupRow['conflict']),
-            'clientId' => $clientId,
-            'clientSeq' => $clientSeq,
-            'updatedAt' => $dupRow['created_at'] ?? null,
-            'updatedBy' => $dupRow['actor'] ?? null,
-            'baseCellVersion' => isset($dupRow['base_cell_version']) ? (int)$dupRow['base_cell_version'] : null,
-            'previousValue' => $dupRow['from_value'] ?? null,
-          ];
-          continue;
-        }
-        $valueRaw = (string)($item['to'] ?? $item['value'] ?? '');
-        $value = trim($valueRaw);
-        if ($value !== '') {
-          if (function_exists('mb_substr')) {
-            $value = mb_substr($value, 0, 20);
-          } else {
-            $value = substr($value, 0, 20);
-          }
-        }
-        $baseCellVersion = isset($item['baseCellVersion']) ? (int)$item['baseCellVersion'] : null;
-        $selectCell->execute([$team, $day, $emp]);
-        $cellRow = $selectCell->fetch();
-        $prevValue = $cellRow['value'] ?? '';
-        $prevVersion = $cellRow ? (int)$cellRow['version'] : 0;
-        $newVersion = $prevVersion + 1;
-        $conflict = ($baseCellVersion !== null && $baseCellVersion !== $prevVersion);
-        $nowIso = current_server_time();
-        $upsertCell->execute([$team, $day, $emp, $value, $newVersion, $nowIso, $actor !== '' ? $actor : $clientId]);
-        $liveVersion++;
-        $insertOp->execute([
-          $team,
-          $day,
-          $emp,
-          $prevValue,
-          $value,
-          $clientId,
-          $clientSeq,
-          $liveVersion,
-          $baseCellVersion,
-          $newVersion,
-          $conflict ? 1 : 0,
-          $actor !== '' ? $actor : null,
-          $nowIso,
-        ]);
-        $results[] = [
-          'day' => $day,
-          'emp' => $emp,
-          'value' => $value,
-          'serverVersion' => $liveVersion,
-          'appliedCellVersion' => $newVersion,
-          'conflict' => $conflict,
-          'clientId' => $clientId,
-          'clientSeq' => $clientSeq,
-          'updatedAt' => $nowIso,
-          'updatedBy' => $actor !== '' ? $actor : null,
-          'baseCellVersion' => $baseCellVersion,
-          'previousValue' => $prevValue,
-        ];
-      }
-      persist_live_version($pdo, $team, $liveVersion);
-      $pdo->commit();
-      send_json([
-        'ok' => true,
-        'results' => $results,
-        'liveVersion' => $liveVersion,
-      ]);
-    } catch (Throwable $e) {
-      if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-      }
-      throw $e;
-    }
-
-  case $method === 'GET' && $path === '/events':
-    if (!realtime_enabled()) {
-      send_error('实时协作未启用', 404);
-    }
-    $team = (string)($_GET['team'] ?? '');
-    $sinceRaw = $_GET['since'] ?? null;
-    $since = is_numeric($sinceRaw) ? (int)$sinceRaw : 0;
-    if ($team === '') {
-      send_error('参数缺失', 400);
-    }
-    $pdo = db();
-    ignore_user_abort(true);
-    set_time_limit(0);
-    header('Content-Type: text/event-stream; charset=utf-8');
-    header('Cache-Control: no-cache');
-    header('Connection: keep-alive');
-    echo ":connected\n\n";
-    echo "event: presence\n";
-    echo 'data: {"users":[]}' . "\n\n";
-    @ob_flush();
-    @flush();
-    $current = $since;
-    $startedAt = time();
-    $lastBeat = time();
-    while (!connection_aborted()) {
-      $stmt = $pdo->prepare('SELECT server_version, day, emp, from_value, to_value, base_cell_version, cell_version, conflict, actor, created_at, client_id, client_seq FROM schedule_ops WHERE team=? AND server_version>? ORDER BY server_version ASC LIMIT 100');
-      $stmt->execute([$team, $current]);
-      $rows = $stmt->fetchAll();
-      if ($rows) {
-        foreach ($rows as $row) {
-          $payload = [
-            'serverVersion' => (int)$row['server_version'],
-            'day' => $row['day'],
-            'emp' => $row['emp'],
-            'from' => $row['from_value'] ?? '',
-            'to' => $row['to_value'] ?? '',
-            'baseCellVersion' => isset($row['base_cell_version']) ? (int)$row['base_cell_version'] : null,
-            'cellVersion' => isset($row['cell_version']) ? (int)$row['cell_version'] : null,
-            'conflict' => !empty($row['conflict']),
-            'updatedBy' => $row['actor'] ?? null,
-            'at' => $row['created_at'] ?? null,
-            'clientId' => $row['client_id'] ?? null,
-            'clientSeq' => isset($row['client_seq']) ? (int)$row['client_seq'] : null,
-          ];
-          $dataLine = json_encode($payload, JSON_UNESCAPED_UNICODE);
-          if ($dataLine === false) {
-            $dataLine = '{}';
-          }
-          echo "event: op\n";
-          echo 'data: ' . $dataLine . "\n\n";
-          $current = (int)$row['server_version'];
-        }
-        @ob_flush();
-        @flush();
-      } else {
-        if (time() - $lastBeat >= 15) {
-          echo ":keepalive\n\n";
-          @ob_flush();
-          @flush();
-          $lastBeat = time();
-        }
-        if ((time() - $startedAt) > 300) {
-          break;
-        }
-        usleep(500000);
-      }
-    }
-    exit;
-
   // 读取某团队 + 时间段的最新排班版本
   case $method === 'GET' && $path === '/schedule':
     $team  = (string)($_GET['team']  ?? 'default');
@@ -1133,163 +505,56 @@ switch (true) {
     if (!$team) send_error('参数缺失', 400);
 
     $pdo = db();
-    $stateStmt = $pdo->prepare('SELECT payload, version, updated_at, updated_by, last_backup_at FROM team_states WHERE team=? LIMIT 1');
-    $stateStmt->execute([$team]);
-    $stateRow = $stateStmt->fetch();
-
-    $response = null;
-
-    if ($stateRow) {
-      $payloadArr = decode_json_assoc($stateRow['payload'] ?? '');
-      if (!$payloadArr) {
-        $payloadArr = [];
-      }
-      $employeesArr = $payloadArr['employees'] ?? [];
-      if (!is_array($employeesArr)) {
-        $employeesArr = [];
-      }
-      $dataArr = $payloadArr['data'] ?? [];
-      if (!is_array($dataArr)) {
-        $dataArr = [];
-      }
-      $employeesJson = json_encode(array_values($employeesArr), JSON_UNESCAPED_UNICODE);
-      if ($employeesJson === false) {
-        $employeesJson = json_encode(array_values($employeesArr), JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '[]';
-      }
-      $dataJson = json_encode($dataArr, JSON_UNESCAPED_UNICODE);
-      if ($dataJson === false) {
-        $dataJson = json_encode($dataArr, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
-      }
-      $payloadJson = json_encode($payloadArr, JSON_UNESCAPED_UNICODE);
-      if ($payloadJson === false) {
-        $payloadJson = json_encode($payloadArr, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
-      }
-      $viewStartPayload = $payloadArr['viewStart'] ?? ($payloadArr['start'] ?? ($payloadArr['view_start'] ?? ''));
-      $viewEndPayload = $payloadArr['viewEnd'] ?? ($payloadArr['end'] ?? ($payloadArr['view_end'] ?? ''));
-      $rowForBuild = [
-        'id' => $stateRow['version'] ?? null,
-        'team' => $team,
-        'view_start' => $viewStartPayload,
-        'view_end' => $viewEndPayload,
-        'employees' => $employeesJson,
-        'data' => $dataJson,
-        'note' => $payloadArr['note'] ?? '',
-        'created_at' => $stateRow['updated_at'] ?? null,
-        'created_by_name' => $stateRow['updated_by'] ?? null,
-        'payload' => $payloadJson,
-      ];
-      $response = build_schedule_payload($rowForBuild, $team);
-      $version = isset($stateRow['version']) ? (int)$stateRow['version'] : null;
-      $response['versionId'] = $version;
-      $response['version_id'] = $version;
-      $response['updated_at'] = $stateRow['updated_at'] ?? null;
-      $response['updated_by'] = $stateRow['updated_by'] ?? null;
-      $response['lastBackupAt'] = $stateRow['last_backup_at'] ?? null;
+    $row = null;
+    if ($start && $end) {
+      $stmt = $pdo->prepare("
+        SELECT id, team, employees, data, view_start, view_end, note, created_at, created_by_name, payload
+        FROM schedule_versions
+        WHERE team=? AND view_start=? AND view_end=?
+        ORDER BY id DESC LIMIT 1
+      ");
+      $stmt->execute([$team, $start, $end]);
+      $row = $stmt->fetch();
+    }
+    if (!$row) {
+      $stmt = $pdo->prepare("
+        SELECT id, team, employees, data, view_start, view_end, note, created_at, created_by_name, payload
+        FROM schedule_versions
+        WHERE team=?
+        ORDER BY id DESC LIMIT 1
+      ");
+      $stmt->execute([$team]);
+      $row = $stmt->fetch();
     }
 
-    if (!$response && !$useRealtime) {
-      $row = null;
-      if ($start && $end) {
-        $stmt = $pdo->prepare("
-          SELECT id, team, employees, data, view_start, view_end, note, created_at, created_by_name, payload
-          FROM schedule_versions
-          WHERE team=? AND view_start=? AND view_end=?
-          ORDER BY id DESC LIMIT 1
-        ");
-        $stmt->execute([$team, $start, $end]);
-        $row = $stmt->fetch();
-      }
-      if (!$row) {
-        $stmt = $pdo->prepare("
-          SELECT id, team, employees, data, view_start, view_end, note, created_at, created_by_name, payload
-          FROM schedule_versions
-          WHERE team=?
-          ORDER BY id DESC LIMIT 1
-        ");
-        $stmt->execute([$team]);
-        $row = $stmt->fetch();
-      }
-      if ($row) {
-        $response = build_schedule_payload($row, $team);
-      }
-    }
-
-    if (!$response) {
+    if (!$row) {
       $viewStart = $start ?: date('Y-m-01');
       $viewEnd = $end ?: date('Y-m-t');
-      $response = [
+      $historyProfile = compute_history_profile($pdo, $team, $start ?: null, $historyYearStart);
+      send_json([
         'team'      => $team,
         'viewStart' => $viewStart,
         'viewEnd'   => $viewEnd,
         'start'     => $viewStart,
         'end'       => $viewEnd,
         'employees' => [],
-        'data'      => [],
+        'data'      => (object)[],
         'note'      => '',
         'created_at'=> null,
         'created_by_name' => null,
         'version_id'=> null,
         'versionId' => null,
+        'historyProfile' => $historyProfile,
         'yearlyOptimize' => false,
-      ];
-    }
-
-    $rangeStart = is_valid_ymd((string)$start) ? (string)$start : '';
-    $rangeEnd = is_valid_ymd((string)$end) ? (string)$end : '';
-    $fallbackStart = $response['viewStart'] ?? ($response['start'] ?? null);
-    $fallbackEnd = $response['viewEnd'] ?? ($response['end'] ?? null);
-    if ($rangeStart === '' && is_valid_ymd((string)$fallbackStart)) {
-      $rangeStart = (string)$fallbackStart;
-    }
-    if ($rangeEnd === '' && is_valid_ymd((string)$fallbackEnd)) {
-      $rangeEnd = (string)$fallbackEnd;
-    }
-
-    if ($useRealtime) {
-      if ($rangeStart === '' || $rangeEnd === '') {
-        $rangeStart = date('Y-m-01');
-        $rangeEnd = date('Y-m-t');
-      }
-      if ($rangeStart > $rangeEnd) {
-        $tmp = $rangeStart;
-        $rangeStart = $rangeEnd;
-        $rangeEnd = $tmp;
-      }
-      $preferredEmployees = is_array($response['employees'] ?? null) ? $response['employees'] : [];
-      $aggregation = aggregate_schedule_cells($pdo, $team, $rangeStart, $rangeEnd, $preferredEmployees);
-      $response['data'] = $aggregation['data'];
-      $response['employees'] = $aggregation['employees'] ?: $preferredEmployees;
-      $response['cellVersions'] = $aggregation['versions'];
-      $response['cellMeta'] = $aggregation['meta'];
-      $response['liveVersion'] = fetch_live_version($pdo, $team);
-      $response['serverTime'] = current_server_time();
-      $response['realtime'] = true;
-      $response['viewStart'] = $rangeStart;
-      $response['viewEnd'] = $rangeEnd;
-      if (empty($response['start'])) {
-        $response['start'] = $rangeStart;
-      }
-      if (empty($response['end'])) {
-        $response['end'] = $rangeEnd;
-      }
+      ]);
     } else {
-      if ($rangeStart === '' && is_valid_ymd((string)$fallbackStart)) {
-        $rangeStart = (string)$fallbackStart;
-      }
-      if ($rangeEnd === '' && is_valid_ymd((string)$fallbackEnd)) {
-        $rangeEnd = (string)$fallbackEnd;
-      }
-      if (!isset($response['data']) || !is_array($response['data'])) {
-        $response['data'] = [];
-      }
-      $response['realtime'] = false;
+      $result = build_schedule_payload($row, $team);
+      $rangeStart = $start ?: ($row['view_start'] ?? null);
+      $result['historyProfile'] = compute_history_profile($pdo, $team, $rangeStart, $historyYearStart);
+      send_json($result);
     }
 
-    $historyRangeStart = $rangeStart !== '' ? $rangeStart : null;
-    $response['historyProfile'] = compute_history_profile($pdo, $team, $historyRangeStart, $historyYearStart);
-    send_json($response);
-
-  // 保存（实时版本）——基于团队状态的乐观锁
+  // 保存（新版本）——乐观锁：baseVersionId 不等于最新时返回 409
   case $method === 'POST' && $path === '/schedule/save':
     $in   = json_input();
     $team = (string)($in['team'] ?? 'default');
@@ -1301,22 +566,33 @@ switch (true) {
     $note = (string)($in['note'] ?? '');
     $operator = trim((string)($in['operator'] ?? '管理员'));
 
-    $pdo = db();
-    $useRealtime = realtime_enabled();
-    if (!is_valid_ymd($vs) || !is_valid_ymd($ve) || $vs > $ve) {
-      send_error('排班范围不合法', 400);
-    }
-    if ($useRealtime) {
-      $aggregation = aggregate_schedule_cells($pdo, $team, $vs, $ve, is_array($emps) ? $emps : []);
-      $emps = $aggregation['employees'];
-      $data = $aggregation['data'];
-    }
-
     if (!$team || !$vs || !$ve || !is_array($emps) || !is_array($data)) {
       send_error('参数不合法', 400);
     }
 
-    $extra = [
+    $pdo = db();
+    $stmt = $pdo->prepare("
+      SELECT id FROM schedule_versions
+      WHERE team=? AND view_start=? AND view_end=?
+      ORDER BY id DESC LIMIT 1
+    ");
+    $stmt->execute([$team, $vs, $ve]);
+    $cur = $stmt->fetch();
+    $latestId = $cur ? (int)$cur['id'] : null;
+
+    if ($latestId !== null && $base !== null && (int)$base !== $latestId) {
+      send_error('保存冲突：已有新版本', 409, ['code'=>409,'latest_version_id'=>$latestId]);
+    }
+
+    $snapshot = [
+      'team' => $team,
+      'viewStart' => $vs,
+      'viewEnd' => $ve,
+      'start' => $vs,
+      'end' => $ve,
+      'employees' => array_values($emps),
+      'data' => $data,
+      'note' => $note,
       'adminDays' => $in['adminDays'] ?? null,
       'restPrefs' => $in['restPrefs'] ?? null,
       'nightRules' => $in['nightRules'] ?? null,
@@ -1341,277 +617,36 @@ switch (true) {
       'albumHistory' => $in['albumHistory'] ?? null,
       'historyProfile' => $in['historyProfile'] ?? null,
       'yearlyOptimize' => $in['yearlyOptimize'] ?? null,
+      'operator' => $operator ?: '管理员',
     ];
-
-    $cellVersionsPayload = $useRealtime ? ($aggregation['versions'] ?? []) : ((isset($in['cellVersions']) && is_array($in['cellVersions'])) ? $in['cellVersions'] : []);
-    $cellMetaPayload = $useRealtime ? ($aggregation['meta'] ?? []) : ((isset($in['cellMeta']) && is_array($in['cellMeta'])) ? $in['cellMeta'] : []);
-
-    try {
-      $result = persist_snapshot($pdo, [
-        'team' => $team,
-        'viewStart' => $vs,
-        'viewEnd' => $ve,
-        'start' => $vs,
-        'end' => $ve,
-        'employees' => array_values($emps),
-        'data' => $data,
-        'note' => $note,
-        'operator' => $operator ?: '管理员',
-        'baseVersionId' => $base,
-        'extra' => $extra,
-        'cellVersions' => $cellVersionsPayload,
-        'cellMeta' => $cellMetaPayload,
-      ]);
-    } catch (SnapshotConflictException $conflict) {
-      $latest = $conflict->getLatestVersion();
-      send_error($conflict->getMessage(), 409, [
-        'code' => 409,
-        'latest_version_id' => $latest,
-        'latestVersionId' => $latest,
-      ]);
-    } catch (InvalidArgumentException $invalid) {
-      send_error($invalid->getMessage(), 400);
+    $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE);
+    if ($snapshotJson === false) {
+      $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
     }
 
-    send_json([
-      'ok' => true,
-      'version_id' => $result['newVersion'],
-      'versionId' => $result['newVersion'],
-      'updated_at' => $result['updatedAt'],
-      'updatedAt' => $result['updatedAt'],
-      'last_backup_at' => $result['lastBackupAt'],
-      'lastBackupAt' => $result['lastBackupAt'],
+    $employeesJson = json_encode(array_values($emps), JSON_UNESCAPED_UNICODE);
+    if ($employeesJson === false) {
+      $employeesJson = json_encode(array_values($emps), JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '[]';
+    }
+    $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE);
+    if ($dataJson === false) {
+      $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
+    }
+
+    $stmt = $pdo->prepare("
+      INSERT INTO schedule_versions(team, view_start, view_end, employees, data, note, created_by_name, payload)
+      VALUES(?,?,?,?,?,?,?,?)
+    ");
+    $stmt->execute([
+      $team, $vs, $ve,
+      $employeesJson,
+      $dataJson,
+      $note,
+      $operator ?: '管理员',
+      $snapshotJson
     ]);
-
-  case $method === 'POST' && $path === '/schedule/version/restore':
-    if (!realtime_enabled()) {
-      send_error('实时协作未启用', 400);
-    }
-    $in = json_input();
-    $team = trim((string)($in['team'] ?? ''));
-    $versionId = (int)($in['versionId'] ?? 0);
-    if ($team === '' || $versionId <= 0) {
-      send_error('参数不合法', 400);
-    }
-    $operator = trim((string)($in['operator'] ?? '管理员'));
-    $noteOverride = array_key_exists('note', $in) ? (string)$in['note'] : '';
-    $baseVersionId = $in['baseVersionId'] ?? null;
-
-    $pdo = db();
-    begin_immediate_transaction($pdo);
-    try {
-      $stmt = $pdo->prepare('SELECT id, team, employees, data, view_start, view_end, note, payload FROM schedule_versions WHERE id=? LIMIT 1');
-      $stmt->execute([$versionId]);
-      $row = $stmt->fetch();
-      if (!$row) {
-        $pdo->rollBack();
-        send_error('历史版本不存在', 404);
-      }
-      $versionTeam = $row['team'] ?? '';
-      if ($versionTeam !== '' && $versionTeam !== $team) {
-        $pdo->rollBack();
-        send_error('该备份不属于指定团队', 400);
-      }
-
-      $payload = build_schedule_payload($row, $team);
-      $targetStart = (string)($payload['viewStart'] ?? ($payload['start'] ?? ''));
-      $targetEnd = (string)($payload['viewEnd'] ?? ($payload['end'] ?? ''));
-      if (!is_valid_ymd($targetStart) || !is_valid_ymd($targetEnd) || $targetStart > $targetEnd) {
-        $pdo->rollBack();
-        send_error('历史版本时间范围不合法', 400);
-      }
-
-      $targetEmployees = [];
-      if (isset($payload['employees']) && is_array($payload['employees'])) {
-        foreach ($payload['employees'] as $emp) {
-          if (!is_string($emp)) continue;
-          $targetEmployees[] = $emp;
-        }
-      }
-      $targetEmployees = array_values(array_unique($targetEmployees));
-
-      $targetDataRaw = $payload['data'] ?? [];
-      if ($targetDataRaw instanceof stdClass) {
-        $targetDataRaw = (array)$targetDataRaw;
-      }
-      if (!is_array($targetDataRaw)) {
-        $targetDataRaw = [];
-      }
-      $targetData = [];
-      foreach ($targetDataRaw as $day => $rowData) {
-        if ($rowData instanceof stdClass) {
-          $rowData = (array)$rowData;
-        }
-        if (!is_array($rowData)) {
-          $rowData = [];
-        }
-        $normalized = [];
-        foreach ($rowData as $emp => $val) {
-          $empStr = trim((string)$emp);
-          if ($empStr === '') continue;
-          if ($val instanceof stdClass) {
-            $val = '';
-          } elseif (is_array($val)) {
-            $val = '';
-          }
-          $normalized[$empStr] = trim($val === null ? '' : (string)$val);
-        }
-        $targetData[$day] = $normalized;
-      }
-
-      $dates = ymd_range($targetStart, $targetEnd);
-      if (!$dates) {
-        $dates = [$targetStart];
-      }
-
-      $currentAggregation = aggregate_schedule_cells($pdo, $team, $targetStart, $targetEnd, $targetEmployees);
-      $currentData = $currentAggregation['data'];
-
-      $ops = [];
-      foreach ($dates as $day) {
-        $targetRow = isset($targetData[$day]) && is_array($targetData[$day]) ? $targetData[$day] : [];
-        $currentRow = isset($currentData[$day]) && is_array($currentData[$day]) ? $currentData[$day] : [];
-        $empSet = array_unique(array_merge(array_keys($targetRow), array_keys($currentRow)));
-        foreach ($empSet as $empName) {
-          $emp = trim((string)$empName);
-          if ($emp === '') continue;
-          $targetVal = $targetRow[$emp] ?? '';
-          if (!is_string($targetVal)) {
-            $targetVal = $targetVal === null ? '' : (string)$targetVal;
-          }
-          $targetVal = trim($targetVal);
-          $currentVal = $currentRow[$emp] ?? '';
-          if (!is_string($currentVal)) {
-            $currentVal = $currentVal === null ? '' : (string)$currentVal;
-          }
-          $currentVal = trim($currentVal);
-          if ($targetVal === $currentVal) {
-            continue;
-          }
-          $ops[] = ['day' => $day, 'emp' => $emp, 'value' => $targetVal];
-        }
-      }
-
-      $liveVersion = fetch_live_version($pdo, $team);
-      $selectCell = $pdo->prepare('SELECT value, version FROM schedule_cells WHERE team=? AND day=? AND emp=? LIMIT 1');
-      $upsertCell = $pdo->prepare('INSERT INTO schedule_cells(team, day, emp, value, version, updated_at, updated_by) VALUES(?,?,?,?,?,?,?) ON CONFLICT(team, day, emp) DO UPDATE SET value=excluded.value, version=excluded.version, updated_at=excluded.updated_at, updated_by=excluded.updated_by');
-      $insertOp = $pdo->prepare('INSERT INTO schedule_ops(team, day, emp, from_value, to_value, client_id, client_seq, server_version, base_cell_version, cell_version, conflict, actor, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)');
-      $actorLabel = $operator !== '' ? $operator : '管理员';
-      try {
-        $randomSuffix = bin2hex(random_bytes(6));
-      } catch (Throwable $e) {
-        $randomSuffix = substr(hash('sha256', microtime(true) . mt_rand()), 0, 12);
-      }
-      $clientId = substr(sprintf('restore#%s#%s', $versionId, $randomSuffix), 0, 120);
-
-      foreach ($ops as $index => $opItem) {
-        $day = $opItem['day'];
-        $emp = $opItem['emp'];
-        $value = $opItem['value'];
-
-        $selectCell->execute([$team, $day, $emp]);
-        $cellRow = $selectCell->fetch();
-        $prevValue = is_string($cellRow['value'] ?? null) ? (string)$cellRow['value'] : '';
-        $prevVersion = $cellRow ? (int)$cellRow['version'] : 0;
-
-        $valueTrim = $value;
-        if ($valueTrim !== '') {
-          if (function_exists('mb_substr')) {
-            $valueTrim = mb_substr($valueTrim, 0, 20);
-          } else {
-            $valueTrim = substr($valueTrim, 0, 20);
-          }
-        }
-
-        if (function_exists('mb_strlen')) {
-          if (mb_strlen($emp) > 100) {
-            $emp = mb_substr($emp, 0, 100);
-          }
-        } elseif (strlen($emp) > 100) {
-          $emp = substr($emp, 0, 100);
-        }
-
-        $newVersion = $prevVersion + 1;
-        $nowIso = current_server_time();
-        $upsertCell->execute([$team, $day, $emp, $valueTrim, $newVersion, $nowIso, $actorLabel]);
-        $liveVersion++;
-        $insertOp->execute([
-          $team,
-          $day,
-          $emp,
-          $prevValue,
-          $valueTrim,
-          $clientId,
-          $index + 1,
-          $liveVersion,
-          $prevVersion,
-          $newVersion,
-          0,
-          $actorLabel,
-          $nowIso,
-        ]);
-      }
-
-      persist_live_version($pdo, $team, $liveVersion);
-
-      $extra = [];
-      foreach (['adminDays','restPrefs','nightRules','nightWindows','nightOverride','rMin','rMax','pMin','pMax','mixMax','shiftColors','staffingAlerts','batchChecked','albumSelected','albumWhiteHour','albumMidHour','albumRangeStartMonth','albumRangeEndMonth','albumMaxDiff','albumAssignments','albumAutoNote','albumHistory','historyProfile','yearlyOptimize'] as $key) {
-        if (array_key_exists($key, $payload)) {
-          $extra[$key] = $payload[$key];
-        }
-      }
-
-      $postAggregation = aggregate_schedule_cells($pdo, $team, $targetStart, $targetEnd, $targetEmployees);
-      $noteForSave = $noteOverride !== '' ? $noteOverride : (string)($payload['note'] ?? '');
-      if ($noteForSave === '') {
-        $noteForSave = '从历史版本 #' . $versionId . ' 恢复';
-      }
-
-      $snapshotResult = persist_snapshot($pdo, [
-        'team' => $team,
-        'viewStart' => $targetStart,
-        'viewEnd' => $targetEnd,
-        'start' => $targetStart,
-        'end' => $targetEnd,
-        'employees' => $postAggregation['employees'] ?: $targetEmployees,
-        'data' => $postAggregation['data'],
-        'note' => $noteForSave,
-        'operator' => $actorLabel,
-        'baseVersionId' => $baseVersionId,
-        'extra' => $extra,
-        'cellVersions' => $postAggregation['versions'],
-        'cellMeta' => $postAggregation['meta'],
-      ]);
-
-      $pdo->commit();
-
-      send_json([
-        'ok' => true,
-        'appliedOps' => count($ops),
-        'version_id' => $snapshotResult['newVersion'],
-        'versionId' => $snapshotResult['newVersion'],
-        'updated_at' => $snapshotResult['updatedAt'],
-        'updatedAt' => $snapshotResult['updatedAt'],
-        'last_backup_at' => $snapshotResult['lastBackupAt'],
-        'lastBackupAt' => $snapshotResult['lastBackupAt'],
-        'liveVersion' => $liveVersion,
-      ]);
-    } catch (SnapshotConflictException $conflict) {
-      if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-      }
-      $latest = $conflict->getLatestVersion();
-      send_error($conflict->getMessage(), 409, [
-        'code' => 409,
-        'latest_version_id' => $latest,
-        'latestVersionId' => $latest,
-      ]);
-    } catch (Throwable $e) {
-      if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-      }
-      throw $e;
-    }
+    $newId = (int)$pdo->lastInsertId();
+    send_json(['ok'=>true, 'version_id'=>$newId]);
 
   // 历史版本列表
   case $method === 'GET' && $path === '/schedule/versions':
@@ -1688,27 +723,6 @@ switch (true) {
     if ($stmt->rowCount() === 0) send_error('记录不存在或已删除', 404);
     send_json(['ok' => true, 'deleted' => true]);
 
-  case $method === 'GET' && $path === '/team/logs':
-    $team = trim((string)($_GET['team'] ?? ''));
-    $limit = (int)($_GET['limit'] ?? 50);
-    if ($team === '') send_error('参数缺失', 400);
-    if ($limit <= 0) $limit = 50;
-    if ($limit > 200) $limit = 200;
-    $pdo = db();
-    $stmt = $pdo->prepare('SELECT id, operator, action, detail, created_at FROM team_activity_logs WHERE team=? ORDER BY created_at DESC, id DESC LIMIT ?');
-    $stmt->execute([$team, $limit]);
-    $rows = $stmt->fetchAll() ?: [];
-    $logs = array_map(function($row) {
-      return [
-        'id' => isset($row['id']) ? (int)$row['id'] : null,
-        'operator' => $row['operator'] ?? '管理员',
-        'action' => $row['action'] ?? '',
-        'detail' => $row['detail'] ?? '',
-        'created_at' => $row['created_at'] ?? null,
-      ];
-    }, $rows);
-    send_json(['logs' => $logs]);
-
   case $method === 'GET' && $path === '/org-config':
     $pdo = db();
     $stmt = $pdo->query('SELECT payload, updated_at FROM org_config WHERE id = 1 LIMIT 1');
@@ -1748,7 +762,6 @@ switch (true) {
       ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at
     ");
     $stmt->execute([$json]);
-    fetch_org_config_payload($pdo, true);
     send_json(['ok' => true]);
 
   case $method === 'GET' && $path === '/template/xlsx':
