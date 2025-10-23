@@ -54,7 +54,7 @@
   <script src="static/js/scheduler-algorithms.js"></script>
 
   <script type="text/babel" data-presets="env,react">
-    const { useState, useMemo, useEffect, useRef, useCallback, useLayoutEffect } = React;
+    const { useState, useMemo, useEffect, useRef, useCallback } = React;
 
     function globalErr(msg){ const bar = document.getElementById('errbar'); if(bar){ bar.textContent = '错误：' + msg; bar.className = 'show bg-red-50 text-red-700 text-sm px-4 py-2'; } }
     window.addEventListener('error', (e)=> globalErr(e?.message || '脚本错误'));
@@ -131,14 +131,6 @@
       d.setDate(d.getDate()-mondayIdx);
       return fmt(d);
     }
-    function formatDateTimeString(value){
-      if(!value) return '—';
-      const str = String(value);
-      const candidate = str.includes('T') ? str : str.replace(' ', 'T');
-      const date = new Date(candidate);
-      if(Number.isNaN(date.getTime())) return str;
-      return date.toLocaleString();
-    }
 
     function albumEntryKey(entry, fallbackIndex = 0){
       if(entry && entry.id) return String(entry.id);
@@ -154,91 +146,6 @@
 
     async function apiGet(path){ const r = await fetch(API_BASE + path, { credentials: 'include' }); if(!r.ok){ let msg='请求失败'; try { const e=await r.json(); msg=e.message||msg; } catch{} throw new Error(msg); } return r.json(); }
     async function apiPost(path, body){ const r = await fetch(API_BASE + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body||{}), credentials: 'include' }); if(!r.ok){ let ejson=null; try { ejson = await r.json(); } catch{} const err = new Error((ejson&&ejson.message)||'请求失败'); if(ejson) err.payload = ejson; throw err; } return r.json(); }
-
-    const REALTIME_CLIENT_ID_KEY = 'scheduler_live_client_id_v1';
-    function getRealtimeClientId(){
-      try {
-        const stored = window.localStorage.getItem(REALTIME_CLIENT_ID_KEY);
-        if(stored) return stored;
-      } catch(err){ /* ignore */ }
-      const generated = `web#${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-      try { window.localStorage.setItem(REALTIME_CLIENT_ID_KEY, generated); } catch(err){ /* ignore */ }
-      return generated;
-    }
-
-    class LiveChannel {
-      constructor({ team, since = 0, onOp, onSnapshot, onPresence, onError, onOpen }){
-        this.team = team;
-        this.since = typeof since === 'number' && Number.isFinite(since) ? since : 0;
-        this.onOp = onOp;
-        this.onSnapshot = onSnapshot;
-        this.onPresence = onPresence;
-        this.onError = onError;
-        this.onOpen = onOpen;
-        this.es = null;
-        this.closed = false;
-        this.retryDelay = 2000;
-      }
-      start(){
-        this.closed = false;
-        this.connect();
-      }
-      connect(){
-        if(this.closed) return;
-        if(this.es){
-          try { this.es.close(); } catch(err){}
-          this.es = null;
-        }
-        const params = new URLSearchParams();
-        params.set('team', this.team);
-        if(this.since > 0){
-          params.set('since', String(this.since));
-        }
-        const url = `${API_BASE}/events?${params.toString()}`;
-        const es = new EventSource(url, { withCredentials: true });
-        this.es = es;
-        es.onopen = () => {
-          this.retryDelay = 2000;
-          if(typeof this.onOpen === 'function') this.onOpen();
-        };
-        es.onerror = () => {
-          if(typeof this.onError === 'function') this.onError();
-          if(this.es){
-            try { this.es.close(); } catch(err){}
-            this.es = null;
-          }
-          if(this.closed) return;
-          const delay = this.retryDelay;
-          this.retryDelay = Math.min(this.retryDelay * 1.5, 15000);
-          setTimeout(()=> this.connect(), delay);
-        };
-        es.addEventListener('op', (event)=>{
-          if(!event?.data) return;
-          try {
-            const payload = JSON.parse(event.data);
-            if(payload && typeof payload.serverVersion === 'number'){ this.since = Math.max(this.since, payload.serverVersion); }
-            if(typeof this.onOp === 'function') this.onOp(payload || {});
-          } catch(err){ console.warn('parse op event failed', err); }
-        });
-        es.addEventListener('snapshot', (event)=>{
-          if(typeof this.onSnapshot === 'function'){
-            try { this.onSnapshot(event?.data ? JSON.parse(event.data) : {}); } catch(err){ this.onSnapshot({}); }
-          }
-        });
-        es.addEventListener('presence', (event)=>{
-          if(typeof this.onPresence === 'function'){
-            try { this.onPresence(event?.data ? JSON.parse(event.data) : {}); } catch(err){ this.onPresence({}); }
-          }
-        });
-      }
-      close(){
-        this.closed = true;
-        if(this.es){
-          try { this.es.close(); } catch(err){}
-        }
-        this.es = null;
-      }
-    }
 
     const isWork = (v)=> !!(v && v!=='休');
     function getVal(data, day, emp){ return (data[day]||{})[emp]||''; }
@@ -341,39 +248,6 @@
         borderRadius: '999px',
         padding: '0 0.35rem'
       };
-    }
-    const AUTO_SAVE_SUFFIX = '自动保存';
-    function extractUserNames(user){
-      if(!user) return { username:'', display:'' };
-      const username = typeof user.username === 'string' ? user.username.trim() : '';
-      const displayRaw = typeof user.display_name === 'string' ? user.display_name : user.displayName;
-      const display = typeof displayRaw === 'string' ? displayRaw.trim() : '';
-      return { username, display };
-    }
-    function formatUserDisplayName(user){
-      const { username, display } = extractUserNames(user);
-      if(display) return display;
-      if(username) return username;
-      return '';
-    }
-    function formatOperatorLabel(user){
-      const { username, display } = extractUserNames(user);
-      if(username && display && username !== display){
-        return `${username}（${display}）`;
-      }
-      if(display) return display;
-      if(username) return username;
-      return '管理员';
-    }
-    function formatAutoSaveOperator(user){
-      const label = formatOperatorLabel(user);
-      if(!label) return AUTO_SAVE_SUFFIX;
-      if(label.endsWith(` ${AUTO_SAVE_SUFFIX}`)) return label;
-      return `${label} ${AUTO_SAVE_SUFFIX}`;
-    }
-    function isAutoSaveLabel(label){
-      if(!label || typeof label !== 'string') return false;
-      return label.trim().endsWith(AUTO_SAVE_SUFFIX);
     }
     function normalizeNightRules(raw){
       const defaults = {
@@ -486,15 +360,6 @@
         }
       };
     }
-    function normalizeBackupConfig(raw){
-      const base = { intervalMinutes: 10, limit: 50 };
-      if(!raw || typeof raw !== 'object') return { ...base };
-      const intervalRaw = raw.intervalMinutes ?? raw.interval_minutes ?? raw.interval ?? 10;
-      const limitRaw = raw.limit ?? raw.maxCount ?? raw.max_count ?? 50;
-      const interval = Number.isFinite(Number(intervalRaw)) ? Math.max(1, Math.round(Number(intervalRaw))) : 10;
-      const limit = Number.isFinite(Number(limitRaw)) ? Math.max(1, Math.round(Number(limitRaw))) : 50;
-      return { intervalMinutes: interval, limit };
-    }
     function defaultOrgConfig(){
       return {
         teams: [
@@ -509,8 +374,7 @@
             menus: defaultMenuPerms({ roles:{ visible:true } }),
             teamAccess:['*']
           }
-        ],
-        backup: normalizeBackupConfig()
+        ]
       };
     }
     function normalizeOrgConfig(raw){
@@ -562,8 +426,7 @@
         teamAccess:['*']
       };
       accounts.push(adminAccount);
-      const backup = normalizeBackupConfig(raw?.backup || defaults.backup);
-      return { teams, accounts, backup };
+      return { teams, accounts };
     }
     function createEmptyTeamState(rangeStart, rangeEnd){
       return {
@@ -598,9 +461,7 @@
         batchChecked: {},
         albumHistory: [],
         historyProfile: null,
-        yearlyOptimize: false,
-        updatedAt: null,
-        lastBackupAt: null
+        yearlyOptimize: false
       };
     }
     const ORG_STORAGE_KEY = 'scheduler_org_config_v1';
@@ -680,7 +541,7 @@
         { key:'album', icon:'magic', label:'专辑审核自动排班' },
         { key:'users', icon:'users', label:'员工管理' },
         { key:'stats', icon:'chart', label:'统计与对齐' },
-        { key:'history', icon:'history', label:'备份记录' },
+        { key:'history', icon:'history', label:'历史版本' },
         { key:'settings', icon:'cog', label:'设置 / 导出' },
         { key:'roles', icon:'lock', label:'角色设置' }
       ];
@@ -796,7 +657,7 @@
             return;
           }
           persistLogin(remember, trimmedUsername, password);
-          onSuccess({ username: accountEntry.username, display_name: accountEntry.displayName || '', role: accountEntry.role, localAccount: true });
+          onSuccess({ username: accountEntry.username, display_name: accountEntry.displayName || accountEntry.username, role: accountEntry.role, localAccount: true });
           return;
         }
         try{
@@ -993,8 +854,6 @@
 
       const [team, setTeam] = useState(()=> (orgConfig.teams?.[0]?.id || 'default'));
       const [note, setNote] = useState('');
-      const [serverUpdatedAt, setServerUpdatedAt] = useState(null);
-      const [lastBackupAt, setLastBackupAt] = useState(null);
       const [planStart, setPlanStart] = useState(defaultStart);
       const [planEnd, setPlanEnd]     = useState(defaultEnd);
       const [viewStart, setViewStart] = useState(defaultStart);
@@ -1002,53 +861,17 @@
       const viewManuallyAdjustedRef = useRef(false);
       const [employees, setEmployees] = useState([]);
       const [data, setData] = useState({});
-      const [realtimeEnabled, setRealtimeEnabled] = useState(false);
-      const [liveVersion, setLiveVersion] = useState(0);
-      const [cellVersions, setCellVersions] = useState({});
-      const [cellMeta, setCellMeta] = useState({});
-      const [historyViewing, setHistoryViewing] = useState(false);
-      const [liveConnected, setLiveConnected] = useState(false);
-      const [pendingOpsTick, setPendingOpsTick] = useState(0);
-      const [isLiveReady, setIsLiveReady] = useState(false);
-      const [conflictHints, setConflictHints] = useState({});
       const [versionId, setVersionId] = useState(null);
       const [versions, setVersions]   = useState([]);
       const [versionsLoading, setVersionsLoading] = useState(false);
       const [showAutoSaves, setShowAutoSaves] = useState(false);
-      const [teamLogs, setTeamLogs] = useState([]);
-      const [teamLogsLoading, setTeamLogsLoading] = useState(false);
-      const [teamLogsError, setTeamLogsError] = useState('');
-      const refreshTeamLogs = useCallback(async ()=>{
-        const trimmedTeam = (team || '').trim();
-        if(!trimmedTeam || !user){
-          setTeamLogs([]);
-          setTeamLogsError('');
-          return;
-        }
-        setTeamLogsLoading(true);
-        setTeamLogsError('');
-        try{
-          const params = new URLSearchParams();
-          params.set('team', trimmedTeam);
-          params.set('limit', '100');
-          const res = await apiGet(`/team/logs?${params.toString()}`);
-          const list = Array.isArray(res?.logs) ? res.logs : [];
-          setTeamLogs(list);
-        }catch(err){
-          setTeamLogsError(err?.message || '加载日志失败');
-        }finally{
-          setTeamLogsLoading(false);
-        }
-      }, [team, user]);
       const filteredVersions = useMemo(()=>{
         if(showAutoSaves) return versions;
         return versions.filter(v=>{
           const operator = (v?.created_by_name || v?.created_by || '').trim();
-          return !isAutoSaveLabel(operator);
+          return operator !== '自动保存';
         });
       }, [versions, showAutoSaves]);
-      const actorName = useMemo(()=> (user?.display_name || user?.displayName || user?.username || '管理员'), [user]);
-      const [versionRestoringId, setVersionRestoringId] = useState(null);
       const [versionDeletingId, setVersionDeletingId] = useState(null);
       const [toast, setToast] = useState(null);
       const toastTimerRef = useRef(null);
@@ -1063,28 +886,6 @@
         setToast({ message, type });
         toastTimerRef.current = setTimeout(()=> setToast(null), duration);
       };
-
-      useEffect(()=>{ cellVersionsRef.current = cellVersions; }, [cellVersions]);
-      useEffect(()=>{ dataRef.current = data; }, [data]);
-      useEffect(()=>{
-        if(!realtimeEnabled){
-          pendingCountsRef.current = {};
-          pendingOpsRef.current.clear();
-          setPendingOpsTick(t=> t + 1);
-        }
-      }, [realtimeEnabled]);
-      useEffect(()=>{ liveSinceRef.current = liveVersion; }, [liveVersion]);
-      useEffect(()=>{
-        return ()=>{
-          conflictTimersRef.current.forEach(timer=> clearTimeout(timer));
-          conflictTimersRef.current.clear();
-        };
-      }, []);
-      useEffect(()=>{
-        if(!realtimeEnabled || historyViewing){
-          setLiveConnected(false);
-        }
-      }, [realtimeEnabled, historyViewing]);
 
       const [prog, setProg] = useState({ running:false, stage:'', done:0, total:100 });
       const [logs, setLogs] = useState([]);
@@ -1109,20 +910,7 @@
       const [albumAutoNote, setAlbumAutoNote] = useState('');
       const [albumHistory, setAlbumHistory] = useState([]);
       const [accountPasswordDrafts, setAccountPasswordDrafts] = useState({});
-      const [accountDisplayDrafts, setAccountDisplayDrafts] = useState({});
       const importInputRef = useRef(null);
-      const cellVersionsRef = useRef(cellVersions);
-      const dataRef = useRef(data);
-      const skipRealtimeSyncRef = useRef(false);
-      const lastSyncedDataRef = useRef(data);
-      const pendingCountsRef = useRef({});
-      const pendingOpsRef = useRef(new Map());
-      const conflictTimersRef = useRef(new Map());
-      const clientIdRef = useRef(getRealtimeClientId());
-      const clientSeqRef = useRef(0);
-      const liveChannelRef = useRef(null);
-      const liveSinceRef = useRef(0);
-      const isLiveReadyRef = useRef(false);
       const [importing, setImporting] = useState(false);
 
       useEffect(()=>{
@@ -1148,16 +936,6 @@
       const [mixMax, setMixMax] = useState(1);
       const [yearlyOptimize, setYearlyOptimize] = useState(false);
 
-      const manualPlanAdjustRef = useRef(false);
-      const handlePlanStartChange = useCallback((value)=>{
-        manualPlanAdjustRef.current = true;
-        setPlanStart(value);
-      }, [setPlanStart]);
-      const handlePlanEndChange = useCallback((value)=>{
-        manualPlanAdjustRef.current = true;
-        setPlanEnd(value);
-      }, [setPlanEnd]);
-
       const skipSaveRef = useRef(false);
       const skipLoadRef = useRef(false);
       const initializedRef = useRef(false);
@@ -1165,7 +943,6 @@
       const snapshotRef = useRef(null);
       const lastSavedSnapshotRef = useRef('');
       const pendingAutoSaveRef = useRef(false);
-      const [autoSaveTicker, setAutoSaveTicker] = useState(0);
       const autoSaveSendingRef = useRef(false);
       const initialTeamSyncRef = useRef({});
 
@@ -1277,11 +1054,7 @@
         if(serialized && serialized === lastSavedSnapshotRef.current){
           pendingAutoSaveRef.current = false;
         } else {
-          const shouldQueue = snapshotHasMeaningfulData(snapshotForRef) && serialized !== lastSavedSnapshotRef.current;
-          pendingAutoSaveRef.current = shouldQueue;
-          if(shouldQueue){
-            setAutoSaveTicker(tick=> tick + 1);
-          }
+          pendingAutoSaveRef.current = snapshotHasMeaningfulData(snapshotForRef) && serialized !== lastSavedSnapshotRef.current;
         }
         skipLoadRef.current = true;
         setTeamStateMap(prev=> ({ ...prev, [team]: snapshot }));
@@ -1297,7 +1070,6 @@
       useEffect(()=>{ tryRestoreRestForView(); }, [team, planStart, planEnd]);
 
       const teamsList = orgConfig.teams || [];
-      const backupConfig = useMemo(()=> normalizeBackupConfig(orgConfig.backup), [orgConfig.backup]);
       const accountConfig = useMemo(()=>{
         if(!user) return null;
         return orgConfig.accounts.find(acc=> acc.username === user.username) || null;
@@ -1361,7 +1133,6 @@
         })();
         return ()=>{ cancelled = true; };
       }, [user, accessibleTeams, team, defaultStart, defaultEnd]);
-      useEffect(()=>{ refreshTeamLogs(); }, [refreshTeamLogs]);
 
       const activeTeam = useMemo(()=> teamsList.find(t=> t.id === team) || teamsList[0] || { id: team, name: team, features:{ albumScheduler:true } }, [teamsList, team]);
       const teamFeatures = activeTeam?.features || { albumScheduler:true };
@@ -1408,7 +1179,7 @@
       }, [allowedTabs, tab]);
 
       const viewReadOnly = menuPerms[tab]?.editable === false;
-      const editingLocked = prog.running || viewReadOnly || historyViewing;
+      const editingLocked = prog.running || viewReadOnly;
       useEffect(()=>{ setVersions([]); }, [team]);
 
       const menuLabels = {
@@ -1417,7 +1188,7 @@
         album: '专辑审核',
         users: '员工管理',
         stats: '统计与对齐',
-        history: '备份记录',
+        history: '历史版本',
         settings: '设置 / 导出',
         roles: '角色设置'
       };
@@ -1491,10 +1262,6 @@
           if(!(username in prev)) return prev;
           const next = { ...prev }; delete next[username]; return next;
         });
-        setAccountDisplayDrafts(prev=>{
-          if(!(username in prev)) return prev;
-          const next = { ...prev }; delete next[username]; return next;
-        });
         if(user && user.username === username){ setUser(null); }
       };
       const setAccountUsername = (username, nextUsername)=>{
@@ -1515,28 +1282,9 @@
           delete next[username];
           return next;
         });
-        setAccountDisplayDrafts(prev=>{
-          if(!(username in prev)) return prev;
-          const next = { ...prev };
-          next[trimmed] = next[username];
-          delete next[username];
-          return next;
-        });
         if(user && user.username === username){ setUser(prev=> prev? { ...prev, username: trimmed } : prev); }
       };
-      const setAccountDisplayDraft = (username, value)=>{
-        setAccountDisplayDrafts(prev=> ({ ...prev, [username]: value }));
-      };
-      const setAccountDisplayName = (username, value)=>{
-        const nextValue = typeof value === 'string' ? value.trim() : '';
-        updateAccountConfig(username, acc=> ({ ...acc, displayName: nextValue }));
-        setAccountDisplayDrafts(prev=>{
-          if(!(username in prev)) return prev;
-          const next = { ...prev };
-          delete next[username];
-          return next;
-        });
-      };
+      const setAccountDisplayName = (username, value)=> updateAccountConfig(username, acc=> ({ ...acc, displayName: value }));
       const setAccountRole = (username, role)=> updateAccountConfig(username, acc=> ({ ...acc, role }));
       const setAccountPassword = (username)=>{
         const raw = accountPasswordDrafts[username] || '';
@@ -1546,21 +1294,6 @@
       const updateAccountPasswordDraft = (username, value)=>{
         setAccountPasswordDrafts(prev=> ({ ...prev, [username]: value }));
       };
-      useEffect(()=>{
-        setAccountDisplayDrafts(prev=>{
-          const keep = {};
-          const valid = new Set((orgConfig.accounts||[]).map(acc=> acc.username));
-          let changed = false;
-          Object.entries(prev).forEach(([key, val])=>{
-            if(valid.has(key)){
-              keep[key] = val;
-            } else {
-              changed = true;
-            }
-          });
-          return changed ? keep : prev;
-        });
-      }, [orgConfig.accounts]);
       const updateAccountMenu = (username, key, field, value)=>{
         updateAccountConfig(username, acc=>{
           const baseMenus = defaultMenuPerms();
@@ -1588,13 +1321,6 @@
           return { ...acc, teamAccess: current };
         });
       };
-      const updateBackupSetting = (field, value)=>{
-        updateOrgConfig(prev=>{
-          const current = normalizeBackupConfig(prev.backup);
-          const next = { ...current, [field]: value };
-          return { ...prev, backup: next };
-        });
-      };
 
       const lastLoadedVersionRef = useRef({});
       const autoLoadedTeamRef = useRef({});
@@ -1608,8 +1334,6 @@
         if(user){
           setTeamStateMap({});
         }
-        setServerUpdatedAt(null);
-        setLastBackupAt(null);
       }, [user?.username]);
       const autoLoadKey = useMemo(()=>{
         const safeTeam = team || 'default';
@@ -1660,8 +1384,6 @@
         const viewEndRaw = get('viewEnd','view_end');
         const resolvedViewStart = typeof viewStartRaw === 'string' && viewStartRaw ? viewStartRaw.slice(0,10) : resolvedStart;
         const resolvedViewEnd = typeof viewEndRaw === 'string' && viewEndRaw ? viewEndRaw.slice(0,10) : resolvedEnd;
-        const updatedAtRaw = get('updatedAt','updated_at');
-        const lastBackupRaw = get('lastBackupAt','last_backup_at');
         const employeesPayload = get('employees');
         const employees = Array.isArray(employeesPayload) ? employeesPayload.map(e=> typeof e === 'string' ? e : String(e)) : [];
         const dataPayload = get('data');
@@ -1734,9 +1456,7 @@
           albumAutoNote: typeof albumAutoNotePayload === 'string' ? albumAutoNotePayload : '',
           albumHistory: Array.isArray(albumHistoryPayload) ? albumHistoryPayload.map(item=> ({ ...item, assignments: item?.assignments || {} })) : [],
           historyProfile: historyProfilePayload || null,
-          yearlyOptimize: yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1',
-          updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw ? updatedAtRaw : null,
-          lastBackupAt: typeof lastBackupRaw === 'string' && lastBackupRaw ? lastBackupRaw : null
+          yearlyOptimize: yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1'
         };
       }
 
@@ -1751,10 +1471,7 @@
         setViewStart(snapshot.viewStart);
         setViewEnd(snapshot.viewEnd);
         setEmployees(Array.isArray(snapshot.employees) ? snapshot.employees.slice() : []);
-        skipRealtimeSyncRef.current = true;
-        const normalizedData = snapshot.data || {};
-        setData(normalizedData);
-        lastSyncedDataRef.current = normalizedData;
+        setData(snapshot.data || {});
         setVersionId(snapshot.versionId || null);
         setShiftColors({ ...snapshot.shiftColors });
         setStaffingAlerts({ ...snapshot.staffingAlerts });
@@ -1781,26 +1498,6 @@
         setAlbumHistory(Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []);
         setHistoryProfile(snapshot.historyProfile || null);
         setYearlyOptimize(snapshot.yearlyOptimize === true);
-        const realtimeFlag = payload && (payload.realtime === true || payload.realtime === 1);
-        const historyView = payload && payload.__history === true;
-        setHistoryViewing(historyView);
-        setRealtimeEnabled(realtimeFlag);
-        const liveVer = typeof payload?.liveVersion === 'number' ? payload.liveVersion : 0;
-        setLiveVersion(liveVer);
-        liveSinceRef.current = liveVer;
-        const versionsPayload = payload && payload.cellVersions && typeof payload.cellVersions === 'object' ? payload.cellVersions : {};
-        setCellVersions(versionsPayload);
-        cellVersionsRef.current = versionsPayload;
-        const cellMetaPayload = payload && payload.cellMeta && typeof payload.cellMeta === 'object' ? payload.cellMeta : {};
-        setCellMeta(cellMetaPayload);
-        pendingCountsRef.current = {};
-        pendingOpsRef.current.clear();
-        setPendingOpsTick(t=> t + 1);
-        setConflictHints({});
-        const payloadUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : (typeof payload?.updated_at === 'string' ? payload.updated_at : (snapshot.updatedAt || null));
-        const payloadBackupAt = typeof payload?.lastBackupAt === 'string' ? payload.lastBackupAt : (typeof payload?.last_backup_at === 'string' ? payload.last_backup_at : (snapshot.lastBackupAt || null));
-        setServerUpdatedAt(payloadUpdatedAt || null);
-        setLastBackupAt(payloadBackupAt || null);
         const snapshotClone = {
           ...snapshot,
           employees: Array.isArray(snapshot.employees) ? snapshot.employees.slice() : [],
@@ -1812,382 +1509,12 @@
           batchChecked: snapshot.batchChecked ? { ...snapshot.batchChecked } : {},
           albumSelected: snapshot.albumSelected ? { ...snapshot.albumSelected } : {},
           albumAssignments: snapshot.albumAssignments ? { ...snapshot.albumAssignments } : {},
-          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : [],
-          updatedAt: payloadUpdatedAt || null,
-          lastBackupAt: payloadBackupAt || null
+          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []
         };
         snapshotRef.current = snapshotClone;
         lastSavedSnapshotRef.current = JSON.stringify(snapshotClone);
         pendingAutoSaveRef.current = false;
       }
-
-      const adjustPendingCount = useCallback((day, emp, delta)=>{
-        if(!day || !emp || !delta) return;
-        const store = pendingCountsRef.current || {};
-        const dayMap = store[day] ? { ...store[day] } : {};
-        const next = Math.max(0, (dayMap[emp] || 0) + delta);
-        if(next <= 0){
-          delete dayMap[emp];
-        } else {
-          dayMap[emp] = next;
-        }
-        if(Object.keys(dayMap).length === 0){
-          delete store[day];
-        } else {
-          store[day] = dayMap;
-        }
-        pendingCountsRef.current = store;
-        setPendingOpsTick(t=> t + 1);
-      }, [setPendingOpsTick]);
-
-      const predictedVersionOf = useCallback((day, emp)=>{
-        const baseMap = cellVersionsRef.current || {};
-        const dayMap = baseMap[day] || {};
-        const base = typeof dayMap[emp] === 'number' ? dayMap[emp] : 0;
-        const pendingMap = pendingCountsRef.current || {};
-        const pendingDay = pendingMap[day] || {};
-        const pending = typeof pendingDay[emp] === 'number' ? pendingDay[emp] : 0;
-        return base + pending;
-      }, []);
-
-      const collectDiff = useCallback((prevData, nextData)=>{
-        const updates = [];
-        const prevKeys = prevData ? Object.keys(prevData) : [];
-        const nextKeys = nextData ? Object.keys(nextData) : [];
-        const daySet = new Set([...prevKeys, ...nextKeys]);
-        for(const day of daySet){
-          if(typeof day !== 'string') continue;
-          const prevRow = (prevData && prevData[day]) || {};
-          const nextRow = (nextData && nextData[day]) || {};
-          const emps = new Set([...Object.keys(prevRow||{}), ...Object.keys(nextRow||{}), ...employees]);
-          for(const emp of emps){
-            if(!emp) continue;
-            const prevValRaw = prevRow && Object.prototype.hasOwnProperty.call(prevRow, emp) ? prevRow[emp] : '';
-            const nextValRaw = nextRow && Object.prototype.hasOwnProperty.call(nextRow, emp) ? nextRow[emp] : '';
-            const prevVal = typeof prevValRaw === 'string' ? prevValRaw : (prevValRaw == null ? '' : String(prevValRaw));
-            const nextVal = typeof nextValRaw === 'string' ? nextValRaw : (nextValRaw == null ? '' : String(nextValRaw));
-            if(prevVal !== nextVal){
-              updates.push({ day, emp, value: nextVal, previous: prevVal });
-            }
-          }
-        }
-        return updates;
-      }, [employees]);
-
-      const removeConflict = useCallback((day, emp)=>{
-        if(!day || !emp) return;
-        setConflictHints(prev => {
-          const row = prev[day];
-          if(!row || !row[emp]) return prev;
-          const next = { ...prev };
-          const map = { ...row };
-          delete map[emp];
-          if(Object.keys(map).length === 0){
-            delete next[day];
-          } else {
-            next[day] = map;
-          }
-          return next;
-        });
-        const key = `${day}__${emp}`;
-        const timers = conflictTimersRef.current;
-        if(timers.has(key)){
-          clearTimeout(timers.get(key));
-          timers.delete(key);
-        }
-      }, []);
-
-      const noteConflict = useCallback((day, emp, info = {})=>{
-        if(!day || !emp) return;
-        setConflictHints(prev => {
-          const next = { ...prev };
-          const map = { ...(next[day] || {}) };
-          map[emp] = info;
-          next[day] = map;
-          return next;
-        });
-        const key = `${day}__${emp}`;
-        const timers = conflictTimersRef.current;
-        if(timers.has(key)){
-          clearTimeout(timers.get(key));
-        }
-        const timer = setTimeout(()=>{
-          removeConflict(day, emp);
-        }, 8000);
-        timers.set(key, timer);
-      }, [removeConflict]);
-
-      const postOps = useCallback(async (opsPayload)=>{
-        const trimmedTeam = (team || '').trim();
-        if(!trimmedTeam) return { results: [] };
-        return apiPost('/ops', { team: trimmedTeam, ops: opsPayload, actor: actorName });
-      }, [team, actorName]);
-
-      const submitOps = useCallback((diffs)=>{
-        if(!realtimeEnabled) return;
-        if(!Array.isArray(diffs) || diffs.length === 0) return;
-        const trimmedTeam = (team || '').trim();
-        if(!trimmedTeam) return;
-        const clientId = clientIdRef.current || getRealtimeClientId();
-        clientIdRef.current = clientId;
-        const opsPayload = [];
-        const revertPayload = [];
-        const pendingKeys = [];
-        for(const diff of diffs){
-          if(!diff || typeof diff !== 'object') continue;
-          const { day, emp, value, previous } = diff;
-          if(!day || !emp) continue;
-          const baseVersion = predictedVersionOf(day, emp);
-          const seq = (clientSeqRef.current || 0) + 1;
-          clientSeqRef.current = seq;
-          const key = `${clientId}:${seq}`;
-          pendingOpsRef.current.set(key, { day, emp, acknowledged: false });
-          adjustPendingCount(day, emp, 1);
-          opsPayload.push({
-            day,
-            emp,
-            to: value === undefined ? '' : value,
-            from: previous === undefined ? '' : previous,
-            baseCellVersion: baseVersion,
-            clientId,
-            clientSeq: seq,
-          });
-          pendingKeys.push(key);
-          revertPayload.push({ day, emp, value: previous });
-        }
-        if(!opsPayload.length) return;
-        setPendingOpsTick(t=> t + 1);
-        postOps(opsPayload).then(res=>{
-          if(res && typeof res.liveVersion === 'number'){ setLiveVersion(res.liveVersion); }
-          const results = Array.isArray(res?.results) ? res.results : [];
-          if(results.length){
-            setCellVersions(prev=>{
-              const next = { ...prev };
-              results.forEach(item=>{
-                if(!item || typeof item !== 'object') return;
-                const day = item.day;
-                const emp = item.emp;
-                if(!day || !emp) return;
-                const map = { ...(next[day] || {}) };
-                if(typeof item.appliedCellVersion === 'number'){
-                  map[emp] = item.appliedCellVersion;
-                }
-                next[day] = map;
-              });
-              return next;
-            });
-            setCellMeta(prev=>{
-              const next = { ...prev };
-              results.forEach(item=>{
-                if(!item || typeof item !== 'object') return;
-                const day = item.day;
-                const emp = item.emp;
-                if(!day || !emp) return;
-                const map = { ...(next[day] || {}) };
-                map[emp] = { updated_at: item.updatedAt || null, updated_by: item.updatedBy || null };
-                next[day] = map;
-              });
-              return next;
-            });
-            results.forEach(item=>{
-              if(!item || typeof item !== 'object') return;
-              const day = item.day;
-              const emp = item.emp;
-              if(!day || !emp) return;
-              removeConflict(day, emp);
-              if(item.conflict){
-                const updater = item.updatedBy || item.actor || '';
-                const message = updater ? `已由 ${updater} 更新` : '该单元格已被他人更新';
-                noteConflict(day, emp, { message, updatedBy: updater, at: item.updatedAt || null });
-              }
-            });
-            const corrections = [];
-            results.forEach(item=>{
-              if(!item || typeof item !== 'object') return;
-              const day = item.day;
-              const emp = item.emp;
-              if(!day || !emp) return;
-              const resultVal = item.value === undefined || item.value === null ? '' : String(item.value);
-              const currentVal = getVal(dataRef.current || {}, day, emp);
-              if(resultVal !== currentVal){
-                corrections.push({ day, emp, value: resultVal });
-              }
-            });
-            if(corrections.length){
-              skipRealtimeSyncRef.current = true;
-              setData(prev=>{
-                const next = { ...prev };
-                corrections.forEach(({ day, emp, value })=>{
-                  const row = { ...(next[day] || {}) };
-                  if(value === ''){
-                    delete row[emp];
-                  } else {
-                    row[emp] = value;
-                  }
-                  next[day] = row;
-                });
-                return next;
-              });
-            }
-            results.forEach(item=>{
-              if(!item) return;
-              const key = `${item.clientId || ''}:${typeof item.clientSeq === 'number' ? item.clientSeq : ''}`;
-              const entry = pendingOpsRef.current.get(key);
-              if(entry){ entry.acknowledged = true; }
-            });
-            const conflicts = results.filter(item=> item && item.conflict);
-            if(conflicts.length){
-              showToast('部分单元格已被他人更新，已同步最新结果', 'warning', 4000);
-            }
-          }
-        }).catch(err=>{
-          pendingKeys.forEach(key=>{
-            const entry = pendingOpsRef.current.get(key);
-            if(entry){
-              adjustPendingCount(entry.day, entry.emp, -1);
-              pendingOpsRef.current.delete(key);
-            }
-          });
-          skipRealtimeSyncRef.current = true;
-          setData(prev=>{
-            const next = { ...prev };
-            for(const revert of revertPayload){
-              const { day, emp, value } = revert;
-              if(!day || !emp) continue;
-              const row = { ...(next[day] || {}) };
-              if(value === '' || value == null){
-                delete row[emp];
-              } else {
-                row[emp] = value;
-              }
-              next[day] = row;
-            }
-            return next;
-          });
-        lastSyncedDataRef.current = dataRef.current;
-        showToast(err?.message || '实时写入失败', 'error', 4000);
-        setPendingOpsTick(t=> t + 1);
-      });
-    }, [realtimeEnabled, team, predictedVersionOf, postOps, adjustPendingCount, showToast, removeConflict, noteConflict]);
-
-      const handleIncomingOp = useCallback((payload)=>{
-        if(!payload || typeof payload !== 'object') return;
-        const day = payload.day;
-        const emp = payload.emp;
-        if(!day || !emp) return;
-        const valueRaw = payload.to;
-        const value = typeof valueRaw === 'string' ? valueRaw : (valueRaw == null ? '' : String(valueRaw));
-        const key = `${payload.clientId || ''}:${typeof payload.clientSeq === 'number' ? payload.clientSeq : ''}`;
-        const entry = pendingOpsRef.current.get(key);
-        if(entry){
-          adjustPendingCount(entry.day, entry.emp, -1);
-          pendingOpsRef.current.delete(key);
-        } else if(payload.clientId && payload.clientId === clientIdRef.current){
-          adjustPendingCount(day, emp, -1);
-        }
-        setPendingOpsTick(t=> t + 1);
-        if(typeof payload.serverVersion === 'number'){ setLiveVersion(payload.serverVersion); }
-        skipRealtimeSyncRef.current = true;
-        setData(prev=>{
-          const next = { ...prev };
-          const row = { ...(next[day] || {}) };
-          if(value === ''){
-            delete row[emp];
-          } else {
-            row[emp] = value;
-          }
-          next[day] = row;
-          return next;
-        });
-        setCellVersions(prev=>{
-          const next = { ...prev };
-          const map = { ...(next[day] || {}) };
-          if(typeof payload.cellVersion === 'number'){
-            map[emp] = payload.cellVersion;
-          } else if(typeof payload.appliedCellVersion === 'number'){
-            map[emp] = payload.appliedCellVersion;
-          }
-          next[day] = map;
-          return next;
-        });
-        setCellMeta(prev=>{
-          const next = { ...prev };
-          const map = { ...(next[day] || {}) };
-          map[emp] = { updated_at: payload.at || null, updated_by: payload.updatedBy || null };
-          next[day] = map;
-          return next;
-        });
-        removeConflict(day, emp);
-        if(payload.conflict){
-          const updater = payload.updatedBy || payload.actor || '';
-          const message = updater ? `已由 ${updater} 更新` : '该单元格已被他人更新';
-          noteConflict(day, emp, { message, updatedBy: updater, at: payload.at || null });
-        }
-      }, [adjustPendingCount, noteConflict, removeConflict]);
-
-      useEffect(()=>{
-        if(liveChannelRef.current){
-          liveChannelRef.current.close();
-          liveChannelRef.current = null;
-        }
-        if(!realtimeEnabled || historyViewing){
-          return;
-        }
-        const trimmedTeam = (team || '').trim();
-        if(!trimmedTeam) return;
-        setLiveConnected(false);
-        const channel = new LiveChannel({
-          team: trimmedTeam,
-          since: liveSinceRef.current || 0,
-          onOp: handleIncomingOp,
-          onOpen: ()=> setLiveConnected(true),
-          onError: ()=> setLiveConnected(false),
-        });
-        liveChannelRef.current = channel;
-        channel.start();
-        return ()=>{
-          channel.close();
-          if(liveChannelRef.current === channel){
-            liveChannelRef.current = null;
-          }
-          setLiveConnected(false);
-        };
-      }, [realtimeEnabled, historyViewing, team, handleIncomingOp]);
-
-      useEffect(()=>{
-        if(!realtimeEnabled || historyViewing){
-          setIsLiveReady(false);
-          isLiveReadyRef.current = false;
-          return;
-        }
-        const hasPendingOps = pendingOpsRef.current && pendingOpsRef.current.size > 0;
-        const counts = pendingCountsRef.current || {};
-        const hasPendingCounts = Object.values(counts).some(map=> map && Object.keys(map).length);
-        const behind = (liveSinceRef.current || 0) < (liveVersion || 0);
-        const ready = liveConnected && !hasPendingOps && !hasPendingCounts && !behind;
-        setIsLiveReady(ready);
-        isLiveReadyRef.current = ready;
-      }, [realtimeEnabled, historyViewing, liveConnected, liveVersion, pendingOpsTick]);
-
-      useEffect(()=>{
-        if(!realtimeEnabled){
-          lastSyncedDataRef.current = data;
-          return;
-        }
-        if(skipRealtimeSyncRef.current){
-          skipRealtimeSyncRef.current = false;
-          lastSyncedDataRef.current = data;
-          return;
-        }
-        const prev = lastSyncedDataRef.current || {};
-        const diffs = collectDiff(prev, data);
-        if(!diffs.length){
-          lastSyncedDataRef.current = data;
-          return;
-        }
-        lastSyncedDataRef.current = data;
-        submitOps(diffs);
-      }, [data, realtimeEnabled, collectDiff, submitOps]);
 
       function buildSavePayload(options = {}, snapshot = snapshotRef.current){
         const base = snapshot || {
@@ -2224,8 +1551,8 @@
           historyProfile,
           yearlyOptimize
         };
-       const noteValue = options.noteOverride !== undefined ? options.noteOverride : (base.note ?? note);
-        const payload = {
+        const noteValue = options.noteOverride !== undefined ? options.noteOverride : (base.note ?? note);
+        return {
           team,
           viewStart: base.viewStart || viewStart,
           viewEnd: base.viewEnd || viewEnd,
@@ -2235,7 +1562,7 @@
           data: base.data || data,
           baseVersionId: base.versionId ?? versionId,
           note: noteValue,
-          operator: options.operatorOverride ?? formatOperatorLabel(user),
+          operator: options.operatorOverride ?? ((user && (user.display_name || user.username)) || '管理员'),
           adminDays: base.adminDays ?? adminDays,
           restPrefs: base.restPrefs ?? sanitizeRestPrefsMap(restPrefs),
           nightRules: base.nightRules ?? normalizeNightRules(nightRules),
@@ -2261,215 +1588,25 @@
           historyProfile: base.historyProfile ?? historyProfile,
           yearlyOptimize: base.yearlyOptimize ?? yearlyOptimize
         };
-        if(realtimeEnabled){
-          delete payload.data;
-        }
-        return payload;
       }
 
-      function safeParseSnapshot(serialized){
-        if(typeof serialized !== 'string' || !serialized) return null;
-        try { return JSON.parse(serialized); } catch { return null; }
-      }
-
-      function cloneDataMap(data){
-        if(!data || typeof data !== 'object') return {};
-        const next = {};
-        Object.keys(data).forEach(day=>{
-          const row = data[day];
-          next[day] = row && typeof row === 'object' ? { ...row } : {};
-        });
-        return next;
-      }
-
-      function computeDataDiff(baseSnapshot, localSnapshot){
-        if(!baseSnapshot || !localSnapshot) return [];
-        const baseData = (baseSnapshot && typeof baseSnapshot.data === 'object') ? baseSnapshot.data : {};
-        const localData = (localSnapshot && typeof localSnapshot.data === 'object') ? localSnapshot.data : {};
-        const days = new Set([...Object.keys(baseData), ...Object.keys(localData)]);
-        const changes = [];
-        days.forEach(day=>{
-          const baseRow = baseData[day] || {};
-          const localRow = localData[day] || {};
-          const emps = new Set([...Object.keys(baseRow), ...Object.keys(localRow)]);
-          emps.forEach(emp=>{
-            const baseVal = (baseRow[emp] ?? '').toString();
-            const localValRaw = localRow[emp];
-            const localVal = localValRaw === undefined || localValRaw === null ? '' : String(localValRaw);
-            if(localVal !== baseVal){
-              changes.push({ day, emp, baseVal, value: localVal });
-            }
-          });
-        });
-        return changes;
-      }
-
-      function jsonEquals(a, b){
-        if(a === b) return true;
-        try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
-      }
-
-      async function fetchLatestSchedulePayload(){
-        if(!team){
-          throw new Error('尚未选择团队，无法加载最新排班');
-        }
-        const params = new URLSearchParams();
-        if(team) params.set('team', team);
-        if(planStart) params.set('start', planStart);
-        if(planEnd) params.set('end', planEnd);
-        if(yearlyOptimize){
-          const yrMatch = (planStart || '').match(/^(\d{4})/);
-          if(yrMatch){
-            params.set('historyYearStart', `${yrMatch[1]}-01-01`);
-            params.set('yearOptimize', '1');
-          }
-        }
-        const query = params.toString();
-        const res = await apiGet(`/schedule${query ? `?${query}` : ''}`);
-        return { ...res, versionId: res.version_id || res.versionId };
-      }
-
-      async function resolveSaveConflict(reason, localSnapshot, options = {}){
-        let latestPayload;
-        try {
-          latestPayload = await fetchLatestSchedulePayload();
-        } catch(err){
-          globalErr(err?.message || '加载最新排班失败');
-          return { applied: 0, skipped: 0 };
-        }
-        if(!latestPayload){
-          return { applied: 0, skipped: 0 };
-        }
-        const baseSnapshot = safeParseSnapshot(lastSavedSnapshotRef.current);
-        const mergedPayload = { ...latestPayload };
-        const mergedData = cloneDataMap(latestPayload.data || {});
-        const baseData = baseSnapshot && typeof baseSnapshot.data === 'object' ? baseSnapshot.data : {};
-        const localData = localSnapshot && typeof localSnapshot.data === 'object' ? localSnapshot.data : {};
-        const diffs = baseSnapshot && localSnapshot ? computeDataDiff(baseSnapshot, localSnapshot) : [];
-        let applied = 0;
-        let skipped = 0;
-        diffs.forEach(diff=>{
-          const serverRow = mergedData[diff.day] || {};
-          const serverVal = serverRow[diff.emp] ?? '';
-          const expectVal = (baseData[diff.day] || {})[diff.emp] ?? '';
-          if(String(serverVal) === String(expectVal)){
-            if(!mergedData[diff.day]) mergedData[diff.day] = {};
-            mergedData[diff.day][diff.emp] = diff.value;
-            applied += 1;
-          } else {
-            skipped += 1;
-          }
-        });
-        mergedPayload.data = mergedData;
-        if(baseSnapshot && localSnapshot){
-          const baseNote = typeof baseSnapshot.note === 'string' ? baseSnapshot.note : '';
-          const serverNote = typeof latestPayload.note === 'string' ? latestPayload.note : '';
-          if(serverNote === baseNote && typeof localSnapshot.note === 'string' && localSnapshot.note !== baseNote){
-            mergedPayload.note = localSnapshot.note;
-            applied += 1;
-          }
-          const mergeableFields = ['adminDays','restPrefs','nightRules','nightWindows','nightOverride','rMin','rMax','pMin','pMax','mixMax','shiftColors','staffingAlerts','batchChecked','albumSelected','albumWhiteHour','albumMidHour','albumRangeStartMonth','albumRangeEndMonth','albumMaxDiff','albumAssignments','albumAutoNote','albumHistory','historyProfile','yearlyOptimize'];
-          mergeableFields.forEach(field=>{
-            const baseVal = baseSnapshot[field];
-            const serverVal = latestPayload[field];
-            const localVal = localSnapshot[field];
-            if(localVal !== undefined && !jsonEquals(localVal, baseVal) && jsonEquals(serverVal, baseVal)){
-              mergedPayload[field] = Array.isArray(localVal) ? localVal.slice() : (localVal && typeof localVal === 'object' ? JSON.parse(JSON.stringify(localVal)) : localVal);
-              applied += 1;
-            }
-          });
-        }
-        applyServerState({ ...mergedPayload, versionId: mergedPayload.versionId ?? mergedPayload.version_id ?? null });
-        skipSaveRef.current = false;
-        const latestVersion = mergedPayload.versionId ?? mergedPayload.version_id ?? null;
-        if(team && latestVersion){
-          lastLoadedVersionRef.current[team] = latestVersion;
-        }
-        if(team){
-          initialTeamSyncRef.current[team] = true;
-        }
-        if(applied > 0){
-          pendingAutoSaveRef.current = true;
-          lastSavedSnapshotRef.current = '';
-          setTimeout(()=> setAutoSaveTicker(tick=> tick + 1), 0);
-        } else {
-          pendingAutoSaveRef.current = false;
-        }
-        if(applied > 0 || skipped > 0){
-          const msg = skipped > 0
-            ? `检测到其他账号已保存新版本，已同步最新数据，${skipped} 项本地改动因冲突未自动合并，请手动确认。`
-            : '检测到其他账号已保存新版本，已同步最新数据并保留本地改动。';
-          showToast(msg, skipped > 0 ? 'error' : 'info');
-        }
-        return { applied, skipped };
-      }
-
-      async function triggerAutoSave(reason, options = {}){
-        const { waitForResponse = false } = options;
-        if(historyViewing) return false;
-        if(realtimeEnabled && !isLiveReadyRef.current) return false;
+      function triggerAutoSave(reason){
         if(autoSaveSendingRef.current) return false;
         if(!pendingAutoSaveRef.current) return false;
         const snapshot = snapshotRef.current;
         if(!snapshot || !snapshotHasMeaningfulData(snapshot)) return false;
         let payload;
         try{
-          const autoOperator = formatAutoSaveOperator(user);
-          const autoNote = snapshot.note && snapshot.note.trim() ? snapshot.note : AUTO_SAVE_SUFFIX;
           payload = buildSavePayload({
-            operatorOverride: autoOperator,
-            noteOverride: autoNote
+            operatorOverride: '自动保存',
+            noteOverride: snapshot.note && snapshot.note.trim() ? snapshot.note : '自动保存'
           }, snapshot);
         }catch(e){
           return false;
         }
-        let serializedSnapshot = '';
-        try{ serializedSnapshot = JSON.stringify(snapshot); }catch(e){ serializedSnapshot = ''; }
-        autoSaveSendingRef.current = true;
-        if(waitForResponse){
-          try{
-            const res = await apiPost('/schedule/save', payload);
-            const returnedVersion = res && (res.version_id || res.versionId);
-            if(returnedVersion){
-              setVersionId(returnedVersion);
-              snapshotRef.current = { ...snapshotRef.current, versionId: returnedVersion };
-              if(team){
-                lastLoadedVersionRef.current[team] = returnedVersion;
-              }
-            }
-            if(res){
-              if(res.updated_at || res.updatedAt){
-                setServerUpdatedAt(res.updated_at || res.updatedAt);
-              }
-              if(res.last_backup_at || res.lastBackupAt){
-                setLastBackupAt(res.last_backup_at || res.lastBackupAt);
-              }
-            }
-            if(serializedSnapshot){
-              lastSavedSnapshotRef.current = serializedSnapshot;
-            }
-            pendingAutoSaveRef.current = false;
-            autoSaveSendingRef.current = false;
-            return true;
-          }catch(error){
-            autoSaveSendingRef.current = false;
-            if(error?.payload && error.payload.code === 409){
-              await resolveSaveConflict(reason, snapshot);
-              return false;
-            }
-            console.warn('自动保存失败', reason, error);
-            pendingAutoSaveRef.current = true;
-            setAutoSaveTicker(tick=> tick + 1);
-            return false;
-          }
-        }
         let body;
-        try{ body = JSON.stringify(payload); } catch(e){
-          autoSaveSendingRef.current = false;
-          pendingAutoSaveRef.current = true;
-          setAutoSaveTicker(tick=> tick + 1);
-          return false;
-        }
+        try{ body = JSON.stringify(payload); } catch(e){ return false; }
+        autoSaveSendingRef.current = true;
         let sent = false;
         if(typeof navigator !== 'undefined' && navigator.sendBeacon){
           try{
@@ -2488,15 +1625,11 @@
             }).catch(()=>{});
           }catch(e){}
         }
-        if(serializedSnapshot){
-          lastSavedSnapshotRef.current = serializedSnapshot;
-        } else {
+        try{
+          lastSavedSnapshotRef.current = JSON.stringify(snapshot);
+        }catch(e){
           lastSavedSnapshotRef.current = body;
         }
-        try{
-          const nowIso = new Date().toISOString();
-          setServerUpdatedAt(nowIso);
-        }catch{}
         pendingAutoSaveRef.current = false;
         autoSaveSendingRef.current = false;
         return true;
@@ -2505,38 +1638,30 @@
       useEffect(()=>{
         const handleBeforeUnload = ()=>{ try{ triggerAutoSave('beforeunload'); }catch(e){} };
         const handlePageHide = ()=>{ try{ triggerAutoSave('pagehide'); }catch(e){} };
-        const handleVisibility = ()=>{
-          if(document.visibilityState === 'hidden'){
-            triggerAutoSave('visibilitychange');
-          }
-        };
         window.addEventListener('beforeunload', handleBeforeUnload);
         window.addEventListener('pagehide', handlePageHide);
-        document.addEventListener('visibilitychange', handleVisibility);
         return ()=>{
           window.removeEventListener('beforeunload', handleBeforeUnload);
           window.removeEventListener('pagehide', handlePageHide);
-          document.removeEventListener('visibilitychange', handleVisibility);
         };
       }, []);
 
-      useEffect(()=>{
-        if(!autoSaveTicker) return;
-        if(!pendingAutoSaveRef.current) return;
-        let cancelled = false;
-        const timer = setTimeout(()=>{
-          if(cancelled) return;
-          triggerAutoSave('debounce', { waitForResponse:true });
-        }, 2500);
-        return ()=>{
-          cancelled = true;
-          clearTimeout(timer);
-        };
-      }, [autoSaveTicker, team]);
-
       async function loadFromServer(){
         try {
-          const payload = await fetchLatestSchedulePayload();
+          const params = new URLSearchParams();
+          if(team) params.set('team', team);
+          if(planStart) params.set('start', planStart);
+          if(planEnd) params.set('end', planEnd);
+          if(yearlyOptimize){
+            const yrMatch = (planStart || '').match(/^(\d{4})/);
+            if(yrMatch){
+              params.set('historyYearStart', `${yrMatch[1]}-01-01`);
+              params.set('yearOptimize', '1');
+            }
+          }
+          const query = params.toString();
+          const res = await apiGet(`/schedule?${query}`);
+          const payload = { ...res, versionId: res.version_id || res.versionId };
           applyServerState(payload);
           const latestVersion = payload.versionId;
           if(latestVersion){
@@ -2549,10 +1674,35 @@
           globalErr(e.message);
         }
       }
+      async function saveToServer(){
+        try{
+          const payload = buildSavePayload();
+          const res = await apiPost('/schedule/save', payload);
+          const returnedVersion = res && (res.version_id || res.versionId);
+          const nextVersion = returnedVersion || versionId || null;
+          applyServerState({ ...payload, versionId: nextVersion });
+          if(nextVersion){
+            lastLoadedVersionRef.current[team] = nextVersion;
+            if(team){
+              initialTeamSyncRef.current[team] = true;
+            }
+          }
+          showToast('已保存新版本', 'success');
+          if(tab === 'history'){
+            loadVersions();
+          }
+        } catch(e){
+          if(e.payload && e.payload.code===409){
+            if(confirm('服务器已有新版本，是否加载最新并覆盖？')) await loadFromServer();
+            return;
+          }
+          globalErr(e.message);
+        }
+      }
       async function loadVersions(){
         const trimmedTeam = (team || '').trim();
         if(!trimmedTeam){
-          globalErr('请选择团队后再刷新备份记录');
+          globalErr('请选择团队后再刷新历史版本');
           return;
         }
         setVersionsLoading(true);
@@ -2571,7 +1721,7 @@
           setVersions(list);
           if(list.length){
             const latestId = list[0]?.id;
-            if(latestId && (!realtimeEnabled || historyViewing) && lastLoadedVersionRef.current[trimmedTeam] !== latestId){
+            if(latestId && lastLoadedVersionRef.current[trimmedTeam] !== latestId){
               await loadVersionById(latestId, { silent:true });
             }
           } else {
@@ -2586,7 +1736,7 @@
       async function loadVersionById(id, options={}){
         try{
           const res = await apiGet(`/version?id=${id}`);
-          applyServerState({ ...res, versionId: id, __history: true });
+          applyServerState({ ...res, versionId: id });
           lastLoadedVersionRef.current[team] = id;
         } catch(e){
           if(!options?.silent){
@@ -2594,54 +1744,9 @@
           }
         }
       }
-      async function restoreVersionById(id){
-        if(!realtimeEnabled){
-          globalErr('当前未启用实时协作，无法创建新版本。');
-          return;
-        }
-        const trimmedTeam = (team || '').trim();
-        if(!trimmedTeam){
-          globalErr('请选择团队后再操作');
-          return;
-        }
-        if(!id) return;
-        if(versionRestoringId){
-          return;
-        }
-        if(!confirm('确定基于该历史版本创建一个新版本并写入当前排班？原历史记录将保留。')) return;
-        setVersionRestoringId(id);
-        try{
-          const payload = {
-            team: trimmedTeam,
-            versionId: id,
-            operator: formatOperatorLabel(user),
-          };
-          if(versionId != null){
-            payload.baseVersionId = versionId;
-          }
-          const res = await apiPost('/schedule/version/restore', payload);
-          showToast('已基于历史版本生成新版本', 'success');
-          setHistoryViewing(false);
-          await loadFromServer();
-          await loadVersions();
-          if(res && typeof res.liveVersion === 'number'){
-            liveSinceRef.current = res.liveVersion;
-            setLiveVersion(res.liveVersion);
-          }
-          const newVersion = (res && (res.versionId || res.version_id)) || null;
-          if(newVersion != null){
-            setVersionId(newVersion);
-            lastLoadedVersionRef.current[trimmedTeam] = newVersion;
-          }
-        } catch(e){
-          globalErr(e?.message || '恢复历史版本失败');
-        } finally {
-          setVersionRestoringId(null);
-        }
-      }
       async function deleteVersionById(id){
         if(!id) return;
-        if(!confirm('确定删除该备份记录吗？删除后无法恢复。')) return;
+        if(!confirm('确定删除该历史版本吗？删除后无法恢复。')) return;
         const trimmedTeam = (team || '').trim();
         if(!trimmedTeam){
           globalErr('请选择团队后再操作');
@@ -2654,7 +1759,7 @@
           if(lastLoadedVersionRef.current[trimmedTeam] === id){
             delete lastLoadedVersionRef.current[trimmedTeam];
           }
-          showToast('已删除备份记录', 'success');
+          showToast('已删除历史版本', 'success');
           await loadVersions();
         } catch(e){
           globalErr(e.message);
@@ -2666,11 +1771,6 @@
         if(!user) return;
         if(!team) return;
         const key = autoLoadKey;
-        if(manualPlanAdjustRef.current && pendingAutoSaveRef.current){
-          manualPlanAdjustRef.current = false;
-          return;
-        }
-        manualPlanAdjustRef.current = false;
         if(autoLoadedTeamRef.current[key]) return;
         autoLoadedTeamRef.current[key] = true;
         loadFromServer();
@@ -2769,10 +1869,10 @@
           setBatchChecked({});
           setAlbumSelected({});
           if(start){
-            handlePlanStartChange(start);
+            setPlanStart(start);
           }
           if(end){
-            handlePlanEndChange(end);
+            setPlanEnd(end);
           }
           if(start || end){
             viewManuallyAdjustedRef.current = false;
@@ -2823,104 +1923,11 @@
         }
         return allDateKeys.filter(day=> (!s || day >= s) && (!e || day <= e));
       }, [planStart, planEnd, allDateKeys]);
-      const gridContainerRef = useRef(null);
-      const gridScrollRafRef = useRef(null);
-      const gridRowHeightRef = useRef(56);
-      const gridColWidthRef = useRef(120);
-      const [gridScrollTop, setGridScrollTop] = useState(0);
-      const [gridScrollLeft, setGridScrollLeft] = useState(0);
-      const [gridViewportHeight, setGridViewportHeight] = useState(0);
-      const [gridViewportWidth, setGridViewportWidth] = useState(0);
-      const [gridRowHeight, setGridRowHeight] = useState(56);
-      const [gridColWidth, setGridColWidth] = useState(120);
-      useEffect(()=>{ gridRowHeightRef.current = gridRowHeight || 56; }, [gridRowHeight]);
-      useEffect(()=>{ gridColWidthRef.current = gridColWidth || 120; }, [gridColWidth]);
-      const handleGridScroll = useCallback((event)=>{
-        const node = event.currentTarget;
-        const top = node ? node.scrollTop : 0;
-        const left = node ? node.scrollLeft : 0;
-        if(gridScrollRafRef.current){
-          cancelAnimationFrame(gridScrollRafRef.current);
-        }
-        gridScrollRafRef.current = requestAnimationFrame(()=>{
-          setGridScrollTop(top);
-          setGridScrollLeft(left);
-        });
-      }, []);
-      useEffect(()=>()=>{ if(gridScrollRafRef.current) cancelAnimationFrame(gridScrollRafRef.current); }, []);
-      useLayoutEffect(()=>{
-        const node = gridContainerRef.current;
-        if(!node) return;
-        const updateSize = ()=>{
-          const nextH = node.clientHeight || 0;
-          const nextW = node.clientWidth || 0;
-          setGridViewportHeight(prev=> Math.abs(prev - nextH) > 1 ? nextH : prev);
-          setGridViewportWidth(prev=> Math.abs(prev - nextW) > 1 ? nextW : prev);
-        };
-        updateSize();
-        if(typeof ResizeObserver !== 'undefined'){
-          const ro = new ResizeObserver(()=> updateSize());
-          ro.observe(node);
-          return ()=> ro.disconnect();
-        }
-        const timer = setInterval(updateSize, 500);
-        return ()=> clearInterval(timer);
-      }, [employees.length, dateList.length]);
-      useEffect(()=>{
-        setGridScrollTop(0);
-        setGridScrollLeft(0);
-        const node = gridContainerRef.current;
-        if(node){
-          node.scrollTop = 0;
-          node.scrollLeft = 0;
-        }
-      }, [team, viewStart, viewEnd, planStart, planEnd, employees.length]);
-      const measureRow = useCallback((node)=>{
-        if(node){
-          const rect = node.getBoundingClientRect();
-          const nextHeight = rect && rect.height ? rect.height : 0;
-          if(nextHeight && Math.abs(nextHeight - gridRowHeightRef.current) > 1){
-            gridRowHeightRef.current = nextHeight;
-            setGridRowHeight(nextHeight);
-          }
-        }
-      }, []);
-      const measureCell = useCallback((node)=>{
-        if(node){
-          const rect = node.getBoundingClientRect();
-          const nextWidth = rect && rect.width ? rect.width : 0;
-          if(nextWidth && Math.abs(nextWidth - gridColWidthRef.current) > 1){
-            gridColWidthRef.current = nextWidth;
-            setGridColWidth(nextWidth);
-          }
-        }
-      }, []);
-      const safeRowHeight = Math.max(1, gridRowHeight || 56);
-      const estimatedRowsInView = gridViewportHeight > 0 ? Math.ceil(gridViewportHeight / safeRowHeight) : 14;
-      const overscanRows = Math.max(10, Math.ceil(estimatedRowsInView / 2));
-      const totalHeight = safeRowHeight * dateList.length;
-      const startIndex = Math.max(0, Math.floor(gridScrollTop / safeRowHeight) - overscanRows);
-      const endIndex = Math.min(dateList.length, Math.ceil((gridScrollTop + gridViewportHeight) / safeRowHeight) + overscanRows);
-      const visibleDates = dateList.slice(startIndex, endIndex);
-      const beforeHeight = startIndex * safeRowHeight;
-      const afterHeight = Math.max(0, totalHeight - endIndex * safeRowHeight);
-      const safeColWidth = Math.max(40, gridColWidth || 120);
-      const totalColumnWidth = safeColWidth * Math.max(employees.length, 0);
-      const estimatedColsInView = gridViewportWidth > 0 ? Math.ceil(gridViewportWidth / safeColWidth) : 8;
-      const overscanCols = Math.max(10, Math.ceil(estimatedColsInView / 2));
-      const startEmpIndex = Math.max(0, Math.floor(gridScrollLeft / safeColWidth) - overscanCols);
-      const endEmpIndex = Math.min(employees.length, Math.ceil((gridScrollLeft + gridViewportWidth) / safeColWidth) + overscanCols);
-      const visibleEmployees = employees.slice(startEmpIndex, endEmpIndex);
-      const beforeColumnWidth = startEmpIndex * safeColWidth;
-      const afterColumnWidth = Math.max(0, totalColumnWidth - endEmpIndex * safeColWidth);
-      const dynamicColumnCount = visibleEmployees.length + (beforeColumnWidth > 0 ? 1 : 0) + (afterColumnWidth > 0 ? 1 : 0);
-      const columnSpan = Math.max(1, 3 + Math.max(dynamicColumnCount, 1));
       const activeCellRef = useRef(null);
       const setCellByIndex = useCallback((dIndex, eIndex, value)=>{
         const d = dateList[dIndex];
         const emp = employees[eIndex];
         if(!d || !emp) return;
-        removeConflict(d, emp);
         setData(prev=>{
           const next = { ...prev };
           const row = { ...(next[d]||{}) };
@@ -2928,7 +1935,7 @@
           next[d] = row;
           return next;
         });
-      }, [dateList, employees, removeConflict]);
+      }, [dateList, employees]);
       const onFocusCell = useCallback((dIndex, eIndex)=>{ activeCellRef.current = { dIndex, eIndex }; }, []);
       const dateCount = dateList.length;
       const empCount = employees.length;
@@ -2937,25 +1944,10 @@
         const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateCount-1));
         const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, empCount-1));
         activeCellRef.current = { dIndex: ni, eIndex: nj };
-        const container = gridContainerRef.current;
-        if(container){
-          const rowHeight = gridRowHeightRef.current || safeRowHeight;
-          const targetTop = ni * rowHeight;
-          const targetBottom = targetTop + rowHeight;
-          const viewTop = container.scrollTop;
-          const viewBottom = viewTop + container.clientHeight;
-          if(targetTop < viewTop){
-            container.scrollTop = targetTop;
-          } else if(targetBottom > viewBottom){
-            container.scrollTop = targetBottom - container.clientHeight;
-          }
-        }
         const id = `cell-${ni}-${nj}`;
-        requestAnimationFrame(()=>{
-          const el = document.getElementById(id);
-          if(el) el.focus();
-        });
-      }, [dateCount, empCount, safeRowHeight]);
+        const el = document.getElementById(id);
+        if(el) el.focus();
+      }, [dateCount, empCount]);
       const openPickerAt = useCallback((di, ei, anchorEl)=>{
         if(editingLocked) return;
         const el = anchorEl || document.getElementById(`cell-${di}-${ei}`);
@@ -3014,10 +2006,6 @@
         day,
         di,
         employeesList,
-        visibleEmployees,
-        startEmpIndex,
-        beforeColumnWidth,
-        afterColumnWidth,
         rowData,
         issue,
         staffingAlerts,
@@ -3026,14 +2014,9 @@
         onFocusCell,
         onKeyDownCell,
         openPickerAt,
-        setCellByIndex,
-        rowRef,
-        measureCell,
-        conflictMap,
-        onClearConflict
+        setCellByIndex
       }){
         const dataRow = rowData || EMPTY_ROW;
-        const conflictRow = conflictMap && typeof conflictMap === 'object' ? conflictMap : EMPTY_ROW;
         const stats = useMemo(()=>{
           let total = 0; let white = 0; let mid1 = 0; let mid2 = 0; let night = 0;
           for(const emp of employeesList){
@@ -3051,7 +2034,7 @@
         const weekend = w===0 || w===6;
         const weekLabel = WN[w];
         return (
-          <tr ref={rowRef || null} data-row-index={di} className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
+          <tr className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
             <td className="py-1.5 px-3 font-medium text-gray-800 left-sticky" style={{minWidth:'8.5rem'}}>
               <div className="flex items-center gap-2"><span>{day}</span></div>
               <div className="text-xs text-gray-500 flex flex-wrap items-center gap-1">
@@ -3071,19 +2054,11 @@
             <td className="py-1.5 px-3 left-sticky-3" style={{minWidth:'9rem'}}>
               {issue? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
             </td>
-            {beforeColumnWidth > 0 && (
-              <td className="py-0" style={{ padding:0, border:0 }}>
-                <div style={{ width: beforeColumnWidth }}></div>
-              </td>
-            )}
-            {visibleEmployees.map((emp, offset)=>{
-              const ei = startEmpIndex + offset;
+            {employeesList.map((emp, ei)=>{
               const value = dataRow[emp] || '';
               const bg = shiftColors[value] || undefined;
-              const cellRef = offset === 0 && measureCell ? measureCell : null;
-              const conflictInfo = conflictRow[emp];
               return (
-                <td key={emp} className="py-1.5 px-3" ref={cellRef}>
+                <td key={emp} className="py-1.5 px-3">
                   <div className="cell-wrap">
                     <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
                       style={{ backgroundColor: bg }} value={value}
@@ -3099,22 +2074,10 @@
                       onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
                       <span className="sr-only">打开班次选择器</span>
                     </button>
-                    {conflictInfo && (
-                      <button type="button" className="absolute top-1 right-1 rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-medium text-white shadow focus:outline-none focus:ring-2 focus:ring-amber-300"
-                        title={conflictInfo.message || '该单元格已被他人更新'}
-                        onClick={()=> onClearConflict && onClearConflict(day, emp)}>
-                        冲突
-                      </button>
-                    )}
                   </div>
                 </td>
               );
             })}
-            {afterColumnWidth > 0 && (
-              <td className="py-0" style={{ padding:0, border:0 }}>
-                <div style={{ width: afterColumnWidth }}></div>
-              </td>
-            )}
           </tr>
         );
       });
@@ -3239,30 +2202,14 @@
             <div className="text-sm text-gray-500">请先在「员工管理」中添加员工。</div>
           ) : (
             <>
-              {historyViewing && (
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
-                  <span>当前正在预览历史备份（版本 ID {versionId ?? '—'}），排班表暂时只读。</span>
-                  <button type="button" className="inline-flex items-center rounded-full bg-amber-500 px-3 py-1 text-white shadow hover:bg-amber-400" onClick={loadFromServer}>返回实时视图</button>
-                </div>
-              )}
-              <div
-                ref={gridContainerRef}
-                className="grid-wrap border rounded-xl shadow-inner"
-                onScroll={handleGridScroll}
-                onPaste={(e)=>{ if(editingLocked) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}
-              >
+              <div className="grid-wrap border rounded-xl shadow-inner" onPaste={(e)=>{ if(editingLocked) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}>
                 <table className="min-w-max text-sm w-full">
                   <thead>
                     <tr className="bg-gray-50">
                       <th className="sticky py-2 px-3 text-left left-sticky" style={{minWidth:'8.5rem'}}>日期</th>
                       <th className="sticky py-2 px-3 text-left left-sticky-2" style={{minWidth:'6.5rem'}}>星期</th>
                       <th className="sticky py-2 px-3 text-left left-sticky-3" style={{minWidth:'9rem'}}>问题</th>
-                      {beforeColumnWidth > 0 && (
-                        <th className="py-0" style={{ padding:0, border:0 }}>
-                          <div style={{ width: beforeColumnWidth }}></div>
-                        </th>
-                      )}
-                      {visibleEmployees.map(e=> {
+                      {employees.map(e=> {
                         const diff = (gridEmpCounts[e]?.总||0) - Number(adminDays||0);
                         const diffCls = diff===0? 'bg-gray-100 text-gray-700' : (diff>0? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700');
                         const tooltip = empYearStats[e];
@@ -3288,54 +2235,26 @@
                           </th>
                         );
                       })}
-                      {afterColumnWidth > 0 && (
-                        <th className="py-0" style={{ padding:0, border:0 }}>
-                          <div style={{ width: afterColumnWidth }}></div>
-                        </th>
-                      )}
                     </tr>
                   </thead>
                   <tbody>
-                    {beforeHeight > 0 && (
-                      <tr key="virtual-top" aria-hidden="true">
-                        <td colSpan={columnSpan} style={{ height: beforeHeight, padding:0, border:0 }}></td>
-                      </tr>
-                    )}
-                    {visibleDates.map((d, idx)=>{
-                      const di = startIndex + idx;
-                      const rowRef = idx === 0 ? measureRow : null;
-                      const cellMeasure = idx === 0 ? measureCell : null;
-                      return (
-                        <ScheduleRow
-                          key={d}
-                          day={d}
-                          di={di}
-                          employeesList={employees}
-                          visibleEmployees={visibleEmployees}
-                          startEmpIndex={startEmpIndex}
-                          beforeColumnWidth={beforeColumnWidth}
-                          afterColumnWidth={afterColumnWidth}
-                          rowData={data[d] || EMPTY_ROW}
-                          issue={nightIssues[d] || ''}
-                          staffingAlerts={staffingAlerts}
-                          editingLocked={editingLocked}
-                          shiftColors={shiftColors}
-                          onFocusCell={onFocusCell}
-                          onKeyDownCell={onKeyDownCell}
-                          openPickerAt={openPickerAt}
-                          setCellByIndex={setCellByIndex}
-                          rowRef={rowRef}
-                          measureCell={cellMeasure}
-                          conflictMap={conflictHints[d] || EMPTY_ROW}
-                          onClearConflict={removeConflict}
-                        />
-                      );
-                    })}
-                    {afterHeight > 0 && (
-                      <tr key="virtual-bottom" aria-hidden="true">
-                        <td colSpan={columnSpan} style={{ height: afterHeight, padding:0, border:0 }}></td>
-                      </tr>
-                    )}
+                    {dateList.map((d,di)=> (
+                      <ScheduleRow
+                        key={d}
+                        day={d}
+                        di={di}
+                        employeesList={employees}
+                        rowData={data[d] || EMPTY_ROW}
+                        issue={nightIssues[d] || ''}
+                        staffingAlerts={staffingAlerts}
+                        editingLocked={editingLocked}
+                        shiftColors={shiftColors}
+                        onFocusCell={onFocusCell}
+                        onKeyDownCell={onKeyDownCell}
+                        openPickerAt={openPickerAt}
+                        setCellByIndex={setCellByIndex}
+                      />
+                    ))}
                   </tbody>
                 </table>
                 <datalist id="shift-options">
@@ -3458,13 +2377,13 @@
               <div className="font-medium text-gray-700">自动排班日期范围</div>
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <label className="inline-flex items-center gap-2">开始
-                    <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planStart}
-                      onChange={e=> handlePlanStartChange(e.target.value)} disabled={editingLocked} />
+                  <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planStart}
+                    onChange={e=> setPlanStart(e.target.value)} disabled={editingLocked} />
                 </label>
                 <span className="text-gray-400">—</span>
                 <label className="inline-flex items-center gap-2">结束
-                    <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planEnd}
-                      onChange={e=> handlePlanEndChange(e.target.value)} disabled={editingLocked} />
+                  <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planEnd}
+                    onChange={e=> setPlanEnd(e.target.value)} disabled={editingLocked} />
                 </label>
                 <span className="text-xs text-gray-400">顶部日期仅用于筛选视图</span>
               </div>
@@ -3475,9 +2394,9 @@
                 <div className="font-medium text-gray-700">每日比例（中1:白）</div>
                 <div className="flex items-center gap-2">
                   <span>1 :</span>
-                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={rMin} onChange={(e)=> setRMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
+                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={rMin} onChange={(e)=> setRMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
                   <span>~</span>
-                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={rMax} onChange={(e)=> setRMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
+                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={rMax} onChange={(e)=> setRMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
                   <span className="text-gray-400">（示例：1:0.4~0.6）</span>
                 </div>
               </div>
@@ -3485,9 +2404,9 @@
                 <div className="font-medium text-gray-700">个人比例（中1:白）</div>
                 <div className="flex items-center gap-2">
                   <span>1 :</span>
-                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={pMin} onChange={(e)=> setPMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
+                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={pMin} onChange={(e)=> setPMin(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
                   <span>~</span>
-                  <input type="number" step="0.05" min="0" max="3" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={pMax} onChange={(e)=> setPMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
+                  <input type="number" step="0.05" min="0" max="3" className="w-24 border rounded px-2 py-1" value={pMax} onChange={(e)=> setPMax(Math.max(0, Math.min(3, parseFloat(e.target.value||'0'))))} />
                   <span className="text-gray-400">（示例：1:0.4~0.6）</span>
                 </div>
               </div>
@@ -3496,13 +2415,13 @@
               <div className="font-medium text-gray-700">混合周期上限（比例）</div>
               <div className="flex items-center gap-2 text-sm">
                 <span>混合周期 ≤ 总周期 ×</span>
-                <input type="number" step="0.05" min="0" max="1" className={`w-24 border rounded px-2 py-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={mixMax} onChange={(e)=> setMixMax(Math.max(0, Math.min(1, parseFloat(e.target.value||'0'))))} disabled={editingLocked} />
+                <input type="number" step="0.05" min="0" max="1" className="w-24 border rounded px-2 py-1" value={mixMax} onChange={(e)=> setMixMax(Math.max(0, Math.min(1, parseFloat(e.target.value||'0'))))} />
                 <span className="text-gray-400">（例如：0.5 表示有白且有中的周期不超过一半）</span>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
-              <PillBtn color="indigo" onClick={runMainRule} disabled={editingLocked} title={editingLocked ? '当前账号仅支持查看，无法执行自动排班' : ''}>开始自动排班</PillBtn>
+              <PillBtn color="indigo" onClick={runMainRule} disabled={prog.running}>开始自动排班</PillBtn>
             </div>
 
             <div className="text-xs text-gray-500">规则说明：① 全程禁止生成“中1→白”相邻；② 严格遵守最多 6 天连续上班；③ 混合周期（白+中1 同在一周期）不超过设定比例；④ 夜/中2 不参与本算法但保留；⑤ 多轮“按天→按人”收敛，优先确保你的目标约束而非速度。</div>
@@ -3517,22 +2436,22 @@
             <div className="space-y-2">
               {nightWindows.map((w,i)=> (
                 <div key={i} className="flex flex-wrap items-end gap-2">
-                  <label className="text-sm">开始 <input type="date" value={w.s} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], s:e.target.value}; return a; })} className={`border rounded px-2 py-1 ml-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} disabled={editingLocked}/></label>
-                  <label className="text-sm">结束 <input type="date" value={w.e} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], e:e.target.value}; return a; })} className={`border rounded px-2 py-1 ml-1 ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} disabled={editingLocked}/></label>
-                  <button className={`px-2 py-1 border rounded ${editingLocked?'opacity-50 cursor-not-allowed':''}`} onClick={()=> setNightWindows(arr=> arr.filter((_,idx)=> idx!==i))} disabled={editingLocked}>删除</button>
+                  <label className="text-sm">开始 <input type="date" value={w.s} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], s:e.target.value}; return a; })} className="border rounded px-2 py-1 ml-1"/></label>
+                  <label className="text-sm">结束 <input type="date" value={w.e} onChange={e=> setNightWindows(arr=>{ const a=[...arr]; a[i]={...a[i], e:e.target.value}; return a; })} className="border rounded px-2 py-1 ml-1"/></label>
+                  <button className="px-2 py-1 border rounded" onClick={()=> setNightWindows(arr=> arr.filter((_,idx)=> idx!==i))}>删除</button>
                 </div>
               ))}
-              <button className={`px-3 py-1.5 border rounded ${editingLocked?'opacity-50 cursor-not-allowed':''}`} onClick={()=> setNightWindows(a=> [...a, {s:planStart,e:planEnd}])} disabled={editingLocked}>新增一段</button>
+              <button className="px-3 py-1.5 border rounded" onClick={()=> setNightWindows(a=> [...a, {s:planStart,e:planEnd}])}>新增一段</button>
             </div>
 
             <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightOverride} onChange={e=> setNightOverride(e.target.checked)} disabled={editingLocked} /> 应用夜/中2时允许覆盖现有班次</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.prioritizeInterval} onChange={e=> setNightRules(r=>({...r, prioritizeInterval:e.target.checked}))} disabled={editingLocked}/> 夜班按间隔优先分配</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterNight} onChange={e=> setNightRules(r=>({...r, restAfterNight:e.target.checked}))} disabled={editingLocked}/> 夜班后休息 2 天</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.enforceRestCap} onChange={e=> setNightRules(r=>({...r, enforceRestCap:e.target.checked}))} disabled={editingLocked}/> 夜后休息不超过 2 天</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterMid2} onChange={e=> setNightRules(r=>({...r, restAfterMid2:e.target.checked}))} disabled={editingLocked}/> 中2 后休息 2 天</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowDoubleMid2} onChange={e=> setNightRules(r=>({...r, allowDoubleMid2:e.target.checked}))} disabled={editingLocked}/> 允许连续 2 个中2</label>
-              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowNightDay4} onChange={e=> setNightRules(r=>({...r, allowNightDay4:e.target.checked}))} disabled={editingLocked}/> 支持周期第 4 天排夜班</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightOverride} onChange={e=> setNightOverride(e.target.checked)} /> 应用夜/中2时允许覆盖现有班次</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.prioritizeInterval} onChange={e=> setNightRules(r=>({...r, prioritizeInterval:e.target.checked}))}/> 夜班按间隔优先分配</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterNight} onChange={e=> setNightRules(r=>({...r, restAfterNight:e.target.checked}))}/> 夜班后休息 2 天</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.enforceRestCap} onChange={e=> setNightRules(r=>({...r, enforceRestCap:e.target.checked}))}/> 夜后休息不超过 2 天</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.restAfterMid2} onChange={e=> setNightRules(r=>({...r, restAfterMid2:e.target.checked}))}/> 中2 后休息 2 天</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowDoubleMid2} onChange={e=> setNightRules(r=>({...r, allowDoubleMid2:e.target.checked}))}/> 允许连续 2 个中2</label>
+              <label className="inline-flex items-center gap-2"><input type="checkbox" checked={nightRules.allowNightDay4} onChange={e=> setNightRules(r=>({...r, allowNightDay4:e.target.checked}))}/> 支持周期第 4 天排夜班</label>
             </div>
 
             <div className="flex flex-wrap items-center gap-3 mt-3 text-sm">
@@ -3541,7 +2460,7 @@
                 let newD={...data};
                 for(const w of nightWindows){ if(!w.s||!w.e) continue; newD = autoAssignNightAndM2({ employees: checkedList, data:newD, start:w.s, end:w.e, override: nightOverride, nightRules, restPrefs }); }
                 setData(newD);
-              }} disabled={editingLocked} title={editingLocked ? '当前账号仅支持查看，无法执行自动排班' : ''}>AI 一键分配 夜/中2（按窗口，多段）</PillBtn>
+              }}>AI 一键分配 夜/中2（按窗口，多段）</PillBtn>
               <span className="text-xs text-gray-500">规则：夜后两天必须休；夜后两天禁止该员工中2；中2后一天强制休。</span>
             </div>
           </div>
@@ -3735,7 +2654,7 @@
       };
 
       const autoAssignAlbum = ()=>{
-        if(editingLocked){ alert('当前账号仅支持查看，无法执行自动排班'); return; }
+        if(editingLocked){ alert('执行中：请稍后再试'); return; }
         if(albumCheckedList.length===0){ alert('请先在左侧勾选参与专辑审核的人员'); return; }
         if(albumDates.length===0){ alert('请先设置有效的月份范围，并确保与当前排班范围有交集'); return; }
         const diffLimitRaw = Number(albumMaxDiff);
@@ -3753,7 +2672,6 @@
       };
 
       const updateAlbumAssignment = (day, field, value)=>{
-        if(editingLocked) return;
         setAlbumAssignments(prev=> ({
           ...prev,
           [day]: { ...(prev?.[day]||{ white:'', mid:'' }), [field]: value }
@@ -3770,14 +2688,14 @@
                 <div className="grid grid-cols-1 gap-2 text-sm text-gray-600">
                   <label className="flex items-center justify-between gap-2">开始月份<MonthInput className="border rounded px-2 py-1" value={albumRangeStartMonth} onChange={setAlbumRangeStartMonth} disabled={editingLocked} /></label>
                   <label className="flex items-center justify-between gap-2">结束月份<MonthInput className="border rounded px-2 py-1" value={albumRangeEndMonth} onChange={setAlbumRangeEndMonth} disabled={editingLocked} /></label>
-                  <label className="flex items-center justify-between gap-2">白班时长（小时）<input type="number" step="0.01" min="0" className={`border rounded px-2 py-1 w-24 text-right ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={albumWhiteHour}
-                    onChange={e=> setAlbumWhiteHour(Number.parseFloat(e.target.value||'0')||0)} disabled={editingLocked} /></label>
-                  <label className="flex items-center justify-between gap-2">中1时长（小时）<input type="number" step="0.01" min="0" className={`border rounded px-2 py-1 w-24 text-right ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={albumMidHour}
-                    onChange={e=> setAlbumMidHour(Number.parseFloat(e.target.value||'0')||0)} disabled={editingLocked} /></label>
-                  <label className="flex items-center justify-between gap-2">允许时长差值 ±<input type="number" step="0.01" min="0" className={`border rounded px-2 py-1 w-24 text-right ${editingLocked?'bg-gray-100 cursor-not-allowed':''}`} value={albumMaxDiff}
-                    onChange={e=> setAlbumMaxDiff(e.target.value===''?0:Number.parseFloat(e.target.value)||0)} disabled={editingLocked} /></label>
+                  <label className="flex items-center justify-between gap-2">白班时长（小时）<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumWhiteHour}
+                    onChange={e=> setAlbumWhiteHour(Number.parseFloat(e.target.value||'0')||0)} /></label>
+                  <label className="flex items-center justify-between gap-2">中1时长（小时）<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumMidHour}
+                    onChange={e=> setAlbumMidHour(Number.parseFloat(e.target.value||'0')||0)} /></label>
+                  <label className="flex items-center justify-between gap-2">允许时长差值 ±<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumMaxDiff}
+                    onChange={e=> setAlbumMaxDiff(e.target.value===''?0:Number.parseFloat(e.target.value)||0)} /></label>
                 </div>
-                <PillBtn color="indigo" onClick={autoAssignAlbum} disabled={editingLocked || albumCheckedList.length===0 || albumDates.length===0} title={editingLocked ? '当前账号仅支持查看，无法执行自动排班' : (albumCheckedList.length===0? '请先勾选人员': albumDates.length===0? '请先设置有效月份范围': '')}>智能生成专辑审核排班</PillBtn>
+                <PillBtn color="indigo" onClick={autoAssignAlbum} disabled={editingLocked || albumCheckedList.length===0 || albumDates.length===0} title={albumCheckedList.length===0? '请先勾选人员': albumDates.length===0? '请先设置有效月份范围': (editingLocked?'执行中：只读':'' )}>智能生成专辑审核排班</PillBtn>
                 {albumAutoNote && <div className="text-xs text-indigo-600 bg-indigo-50/80 border border-indigo-100 rounded-xl px-3 py-2">{albumAutoNote}</div>}
                 <div className="text-xs text-gray-500">提示：参数调整后可重新生成；排班结果支持右侧表格内手动微调。</div>
               </div>
@@ -3851,8 +2769,8 @@
                           const weekLabel = WN[new Date(day).getDay()];
                           const whiteCandidates = albumCheckedList.filter(emp=> (row[emp]||'')==='白');
                           const midCandidates = albumCheckedList.filter(emp=> (row[emp]||'')==='中1');
-                          const whiteClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.white ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'} ${editingLocked?'opacity-60 cursor-not-allowed':''}`;
-                          const midClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.mid ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'} ${editingLocked?'opacity-60 cursor-not-allowed':''}`;
+                          const whiteClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.white ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'}`;
+                          const midClass = `border rounded px-2 py-1 w-full text-sm transition-colors ${info.mid ? 'bg-white border-gray-200 text-gray-700' : 'bg-rose-50 border-rose-200 text-rose-600'}`;
                           return (
                             <tr key={`album-${day}`} className="border-t hover:bg-indigo-50/20">
                               <td className="py-1.5 px-3 font-medium text-gray-700">{day}</td>
@@ -3862,8 +2780,7 @@
                                   className={whiteClass}
                                   value={info.white || ''}
                                   onChange={e=> updateAlbumAssignment(day, 'white', e.target.value)}
-                                  title={editingLocked ? '当前账号仅支持查看' : (whiteCandidates.length===0 ? '当日无白班可选' : '请选择白班审核人')}
-                                  disabled={editingLocked}
+                                  title={whiteCandidates.length===0 ? '当日无白班可选' : '请选择白班审核人'}
                                 >
                                   <option value="">未分配</option>
                                   {whiteCandidates.map(emp=> (
@@ -3876,8 +2793,7 @@
                                   className={midClass}
                                   value={info.mid || ''}
                                   onChange={e=> updateAlbumAssignment(day, 'mid', e.target.value)}
-                                  title={editingLocked ? '当前账号仅支持查看' : (midCandidates.length===0 ? '当日无中1可选' : '请选择中班审核人')}
-                                  disabled={editingLocked}
+                                  title={midCandidates.length===0 ? '当日无中1可选' : '请选择中班审核人'}
                                 >
                                   <option value="">未分配</option>
                                   {midCandidates.map(emp=> (
@@ -4061,7 +2977,7 @@
                 </tbody>
               </table>
             </div>
-            <div className="mt-3 text-xs text-gray-500">人员与偏好会随编辑自动保存，并参与团队备份。</div>
+            <div className="mt-3"><PillBtn color="emerald" onClick={saveToServer} disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存人员与偏好到服务器</PillBtn></div>
           </div>
         </Section>
       );
@@ -4671,34 +3587,33 @@
         );
       })();
 
-
       const ViewHistory = (
-        <Section title={`备份记录（${teamDisplayName}）`} right={<div className="flex items-center gap-3">
+        <Section title={`历史版本（${teamDisplayName}）`} right={<div className="flex items-center gap-3">
           <label className="inline-flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" className="rounded" checked={showAutoSaves} onChange={e=> setShowAutoSaves(e.target.checked)} />显示自动保存</label>
           <button onClick={loadVersions} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(editingLocked || versionsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={editingLocked || versionsLoading}>
-            {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新备份'}
+            {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新列表'}
           </button>
         </div>}>
           {versionsLoading && filteredVersions.length>0 && (
             <div className="flex items-center gap-2 text-xs text-gray-500 mb-3">
               <Spinner className="w-4 h-4 text-indigo-500" />
-              <span>正在刷新备份记录，请稍候…</span>
+              <span>正在刷新历史版本，请稍候…</span>
             </div>
           )}
           {versionsLoading && filteredVersions.length===0 ? (
-            <div className="text-sm text-gray-500">正在加载备份记录…</div>
+            <div className="text-sm text-gray-500">正在加载历史版本…</div>
           ) : filteredVersions.length===0 ? (
-            versions.length>0 && !showAutoSaves && versions.some(v=> isAutoSaveLabel((v?.created_by_name || v?.created_by || '').trim())) ? (
+            versions.length>0 && !showAutoSaves && versions.some(v=> (v?.created_by_name || v?.created_by || '').trim()==='自动保存') ? (
               <p className="text-sm text-gray-500">当前筛选仅隐藏了自动保存记录，如需查看请勾选“显示自动保存”。</p>
             ) : (
-              <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无备份记录，稍后刷新即可。</p>
+              <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无历史版本，请在“设置 / 导出”页保存新版本或稍后刷新。</p>
             )
           ) : (
             <div className="overflow-auto rounded-2xl border" style={{ maxHeight: 'min(70vh, calc(100vh - 240px))' }}>
               <table className="text-sm w-full min-w-[780px]">
                 <thead className="bg-gray-50 text-gray-500">
                   <tr>
-                    <th className="text-left py-2 px-3">备份备注</th>
+                    <th className="text-left py-2 px-3">版本名</th>
                     <th className="text-left py-2 px-3">团队</th>
                     <th className="text-left py-2 px-3">版本ID</th>
                     <th className="text-left py-2 px-3">保存时间</th>
@@ -4715,9 +3630,8 @@
                     const createdAt = v.created_at || v.createdAt || '—';
                     const operatorRaw = v.created_by_name || v.created_by || '管理员';
                     const operator = operatorRaw || '管理员';
-                    const isAuto = isAutoSaveLabel(operatorRaw);
+                    const isAuto = (operatorRaw || '').trim() === '自动保存';
                     const deleting = versionDeletingId === v.id;
-                    const restoring = versionRestoringId === v.id;
                     return (
                       <tr key={v.id} className="border-t hover:bg-gray-50">
                         <td className="py-1 px-3">
@@ -4725,25 +3639,15 @@
                         </td>
                         <td className="py-1 px-3 text-gray-600">{teamName}</td>
                         <td className="py-1 px-3 text-gray-600">{v.id}</td>
-                        <td className="py-1 px-3 text-gray-600">{formatDateTimeString(createdAt)}</td>
+                        <td className="py-1 px-3 text-gray-600">{createdAt}</td>
                         <td className="py-1 px-3 text-gray-600">
                           <span>{operator}</span>
                           {isAuto && <span className="ml-2 inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-500">自动保存</span>}
                         </td>
                         <td className="py-1 px-3 text-gray-600">{remark || '—'}</td>
                         <td className="py-1 px-3">
-                          <div className="flex flex-wrap items-center gap-3">
-                            {realtimeEnabled && (
-                              <button
-                                type="button"
-                                className="flex items-center gap-1 text-emerald-600 hover:underline disabled:text-emerald-300 disabled:no-underline"
-                                onClick={()=> restoreVersionById(v.id)}
-                                disabled={deleting || restoring || versionsLoading || prog.running}
-                              >
-                                {restoring ? (<><Spinner className="w-3.5 h-3.5 text-emerald-500" /><span>创建中…</span></>) : '基于此版本创建新版本'}
-                              </button>
-                            )}
-                            <button type="button" className="text-indigo-600 hover:underline disabled:text-gray-400 disabled:no-underline" onClick={()=>loadVersionById(v.id)} disabled={versionsLoading || deleting}>预览</button>
+                          <div className="flex items-center gap-3">
+                            <button type="button" className="text-indigo-600 hover:underline disabled:text-gray-400 disabled:no-underline" onClick={()=>loadVersionById(v.id)} disabled={versionsLoading || deleting}>载入</button>
                             <button type="button" className="flex items-center gap-1 text-rose-600 hover:underline disabled:text-rose-300 disabled:no-underline" onClick={()=>deleteVersionById(v.id)} disabled={deleting || versionsLoading}>
                               {deleting ? (<><Spinner className="w-3.5 h-3.5 text-rose-500" /><span>删除中</span></>) : '删除'}
                             </button>
@@ -4756,39 +3660,6 @@
               </table>
             </div>
           )}
-          <div className="mt-6 rounded-2xl border bg-white/80 p-4">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-gray-700">操作日志</h3>
-              <button onClick={refreshTeamLogs} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(teamLogsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={teamLogsLoading}>
-                {teamLogsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新日志'}
-              </button>
-            </div>
-            {teamLogsError ? (
-              <div className="text-xs text-rose-500">{teamLogsError}</div>
-            ) : teamLogsLoading && teamLogs.length===0 ? (
-              <div className="text-xs text-gray-500">日志加载中…</div>
-            ) : teamLogs.length === 0 ? (
-              <div className="text-xs text-gray-500">暂无操作日志。</div>
-            ) : (
-              <ul className="space-y-2">
-                {teamLogs.map((log, idx)=> {
-                  const createdAt = log?.created_at || log?.createdAt || null;
-                  const key = log?.id != null ? String(log.id) : `${createdAt || 'log'}-${idx}`;
-                  const actionLabel = log?.action === 'update_schedule' ? '更新排班' : (log?.action || '操作');
-                  return (
-                    <li key={key} className="border rounded-xl bg-white/70 px-3 py-2 shadow-sm">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-sm font-medium text-gray-800">{actionLabel}</span>
-                        <span className="text-xs text-gray-400">{formatDateTimeString(createdAt)}</span>
-                      </div>
-                      <div className="mt-1 text-xs text-gray-500">操作者：{log?.operator || '—'}</div>
-                      {log?.detail ? <div className="mt-1 text-sm text-gray-600">{log.detail}</div> : null}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
         </Section>
       );
       const scheduleYearLabel = (()=>{
@@ -4799,31 +3670,21 @@
         <Section title="设置 / 导出">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm text-gray-600 mb-1">排班备注（自动保存）</label>
+              <label className="block text-sm text-gray-600 mb-1">保存备注</label>
               <input className="w-full border rounded px-3 py-2" value={note}
                 onCompositionStart={e=>{ e.target.isComposing = true; }}
                 onCompositionEnd={e=>{ e.target.isComposing = false; setNote(e.target.value); }}
-                onChange={allowIme(e=>setNote(e.target.value))} placeholder="例如：10月排班说明（将自动同步）"/>
+                onChange={allowIme(e=>setNote(e.target.value))} placeholder="例如：10月第一版"/>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <label className="block text-sm text-gray-600">备份间隔（分钟）
-                <input type="number" min={1} className="mt-1 w-full border rounded px-3 py-2" value={backupConfig.intervalMinutes}
-                  onChange={e=> updateBackupSetting('intervalMinutes', Math.max(1, Number(e.target.value)||1))} />
-              </label>
-              <label className="block text-sm text-gray-600">备份保留数量
-                <input type="number" min={1} className="mt-1 w-full border rounded px-3 py-2" value={backupConfig.limit}
-                  onChange={e=> updateBackupSetting('limit', Math.max(1, Number(e.target.value)||1))} />
-              </label>
+            <div className="flex flex-wrap items-end gap-2">
+              <PillBtn onClick={saveToServer} color="emerald" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存新版本</PillBtn>
+              <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>服务器导出 Excel/CSV</PillBtn>
+              <PillBtn onClick={downloadTemplate} color="gray">下载导入模板</PillBtn>
+              <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?'执行中：只读':(importing?'导入中…':'')}>
+                {importing ? (<><Spinner className="w-4 h-4 text-white" /> 导入中…</>) : '导入 Excel' }
+              </PillBtn>
+              <input type="file" ref={importInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={onImportInputChange} />
             </div>
-          </div>
-          <div className="mt-2 text-xs text-gray-500">所有改动会立即写入服务器，并按上述设置自动备份。<span className="ml-2">最近保存：{formatDateTimeString(serverUpdatedAt)}</span><span className="ml-2">最近备份：{formatDateTimeString(lastBackupAt)}</span></div>
-          <div className="mt-4 flex flex-wrap items-end gap-2">
-            <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>服务器导出 Excel/CSV</PillBtn>
-            <PillBtn onClick={downloadTemplate} color="gray">下载导入模板</PillBtn>
-            <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?'执行中：只读':(importing?'导入中…':'')}>
-              {importing ? (<><Spinner className="w-4 h-4 text-white" /> 导入中…</>) : '导入 Excel' }
-            </PillBtn>
-            <input type="file" ref={importInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={onImportInputChange} />
           </div>
           <div className="mt-2 text-xs text-gray-500">导入支持 XLSX / XLS / CSV 格式，将覆盖当前排班并自动更新周期。</div>
           <div className="mt-6">
@@ -4942,8 +3803,6 @@
                 extraAccounts.map(acc=>{
                   const hasAll = acc.teamAccess && acc.teamAccess.includes('*');
                   const passwordDraft = accountPasswordDrafts[acc.username] || '';
-                  const displayDraft = accountDisplayDrafts[acc.username];
-                  const displayValue = displayDraft !== undefined ? displayDraft : (acc.displayName || '');
                   return (
                     <div key={acc.username} className="border rounded-2xl p-4 bg-white shadow-sm space-y-3">
                       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -4956,12 +3815,10 @@
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">显示名称</span>
-                          <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={displayValue}
+                          <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.displayName||''}
                             onCompositionStart={e=>{ e.target.isComposing = true; }}
                             onCompositionEnd={e=>{ e.target.isComposing = false; setAccountDisplayName(acc.username, e.target.value); }}
-                            onChange={e=> setAccountDisplayDraft(acc.username, e.target.value)}
-                            onBlur={e=>{ if(!editingLocked) setAccountDisplayName(acc.username, e.target.value); }}
-                            disabled={editingLocked} />
+                            onChange={allowIme(e=> setAccountDisplayName(acc.username, e.target.value))} disabled={editingLocked} />
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">角色</span>
@@ -5032,14 +3889,10 @@
         </Section>
       );
 
-      const userDisplayName = user ? (formatUserDisplayName(user) || '访客') : '';
       const Topbar = (
         <div className="sticky top-0 z-30 bg-gradient-to-b from-white/90 to-white/60 backdrop-blur border-b">
           <div className="layout-shell py-3 flex items-center gap-3">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:gap-3 gap-1">
-              <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
-              {userDisplayName && <span className="text-sm text-gray-500">您好，{userDisplayName}</span>}
-            </div>
+            <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
             <div className="flex-1"></div>
             <div className="flex lg:hidden items-center gap-2 text-sm mr-2">
               <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
@@ -5052,11 +3905,7 @@
             </div>
             <div className="flex items-center gap-2">
               <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked}>导出</PillBtn>
-              {user ? (
-                <button onClick={doLogout} className={`px-3 py-1.5 rounded-full text-sm ${prog.running?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={prog.running}>退出</button>
-              ) : (
-                <span className="text-xs text-gray-500">未登录</span>
-              )}
+              {user ? (<button onClick={async()=>{ await apiPost('/logout',{}).catch(()=>{}); setUser(null); }} className={`px-3 py-1.5 rounded-full text-sm ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={editingLocked}>退出</button>) : (<span className="text-xs text-gray-500">未登录</span>)}
             </div>
           </div>
           {Object.keys(nightIssues).length>0 && (
@@ -5072,7 +3921,7 @@
           {Topbar}
           <div className="layout-shell py-6">
             <SideDock tab={tab} setTab={setTab} menuPerms={menuPerms}/>
-            <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.4</footer></main>
+            <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.3</footer></main>
           </div>
 
           {toast && (
