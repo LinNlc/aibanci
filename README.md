@@ -97,3 +97,16 @@ FROM schedule_versions v,
 - 前端通过 `clientId + clientSeq` 保证操作幂等，服务端也对相同标识做了去重。
 
 如需进一步扩展（在线用户浮标、只读锁等），可在现有 SSE 渠道追加自定义事件。
+
+## 1Panel 快速部署教程（简化版）
+
+以下步骤假定你已经通过 1Panel 创建好站点，并把本项目代码放在站点目录中：
+
+1. **确认 PHP 和 SQLite 扩展**：在 1Panel → 应用 → OpenResty（或 PHP 运行环境）中，确保 `pdo_sqlite` 已启用。若尚未启用，勾选后点击“应用配置”。
+2. **同步代码**：将仓库内容上传至站点目录（例如 `/opt/1panel/apps/openresty/openresty/www/sites/<你的站点>/`），保持 `api/index.php` 与 `index.html` 原有相对路径。
+3. **数据库初始化**：第一次访问接口时会自动在 `api/data/data.sqlite`（或 1Panel 默认目录）生成数据库文件；无需手动建库。如需迁移旧数据，可在生成的数据库上执行前文提供的 SQL。
+4. **配置反向代理**：在 1Panel 站点配置中，将 `/api/` 转发到 PHP（FastCGI）入口，并按下文的 Nginx 片段关闭 `proxy_buffering`、`fastcgi_buffering`，确保 SSE 可以长连。
+5. **设置环境变量（可选）**：若需灰度控制，可在站点环境变量中新增 `REALTIME_ENABLED=true`；设为 `false` 时会退回旧的整页快照模式。
+6. **重载服务并验证**：在 1Panel 面板中点击“重载/重启”Nginx 或 OpenResty，随后访问前端页面，检查 `/api/schedule` 能返回 `realtime:true` 以及 `/api/events` SSE 能持续响应。
+
+遇到权限问题时，可在 1Panel 文件管理里为 `api/data/` 目录授予运行用户写入权限（一般为 `www` 或 `nginx`）。

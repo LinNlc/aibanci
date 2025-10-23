@@ -506,6 +506,13 @@ function persist_live_version(PDO $pdo, string $team, int $version): void {
   }
 }
 
+function begin_immediate_transaction(PDO $pdo): void {
+  if ($pdo->inTransaction()) {
+    return;
+  }
+  $pdo->exec('BEGIN IMMEDIATE TRANSACTION');
+}
+
 function aggregate_schedule_cells(PDO $pdo, string $team, string $start, string $end, array $preferredEmployees = []): array {
   $dates = ymd_range($start, $end);
   $data = [];
@@ -726,7 +733,7 @@ switch (true) {
       send_error('参数不合法', 400);
     }
     $pdo = db();
-    $pdo->beginTransaction();
+    begin_immediate_transaction($pdo);
     try {
       $liveVersion = fetch_live_version($pdo, $team);
       $results = [];
