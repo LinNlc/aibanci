@@ -1006,6 +1006,11 @@
       const [liveVersion, setLiveVersion] = useState(0);
       const [cellVersions, setCellVersions] = useState({});
       const [cellMeta, setCellMeta] = useState({});
+      const [historyViewing, setHistoryViewing] = useState(false);
+      const [liveConnected, setLiveConnected] = useState(false);
+      const [pendingOpsTick, setPendingOpsTick] = useState(0);
+      const [isLiveReady, setIsLiveReady] = useState(false);
+      const [conflictHints, setConflictHints] = useState({});
       const [versionId, setVersionId] = useState(null);
       const [versions, setVersions]   = useState([]);
       const [versionsLoading, setVersionsLoading] = useState(false);
@@ -1043,6 +1048,7 @@
         });
       }, [versions, showAutoSaves]);
       const actorName = useMemo(()=> (user?.display_name || user?.displayName || user?.username || '管理员'), [user]);
+      const [versionRestoringId, setVersionRestoringId] = useState(null);
       const [versionDeletingId, setVersionDeletingId] = useState(null);
       const [toast, setToast] = useState(null);
       const toastTimerRef = useRef(null);
@@ -1064,9 +1070,21 @@
         if(!realtimeEnabled){
           pendingCountsRef.current = {};
           pendingOpsRef.current.clear();
+          setPendingOpsTick(t=> t + 1);
         }
       }, [realtimeEnabled]);
       useEffect(()=>{ liveSinceRef.current = liveVersion; }, [liveVersion]);
+      useEffect(()=>{
+        return ()=>{
+          conflictTimersRef.current.forEach(timer=> clearTimeout(timer));
+          conflictTimersRef.current.clear();
+        };
+      }, []);
+      useEffect(()=>{
+        if(!realtimeEnabled || historyViewing){
+          setLiveConnected(false);
+        }
+      }, [realtimeEnabled, historyViewing]);
 
       const [prog, setProg] = useState({ running:false, stage:'', done:0, total:100 });
       const [logs, setLogs] = useState([]);
@@ -1099,10 +1117,12 @@
       const lastSyncedDataRef = useRef(data);
       const pendingCountsRef = useRef({});
       const pendingOpsRef = useRef(new Map());
+      const conflictTimersRef = useRef(new Map());
       const clientIdRef = useRef(getRealtimeClientId());
       const clientSeqRef = useRef(0);
       const liveChannelRef = useRef(null);
       const liveSinceRef = useRef(0);
+      const isLiveReadyRef = useRef(false);
       const [importing, setImporting] = useState(false);
 
       useEffect(()=>{
@@ -1388,7 +1408,7 @@
       }, [allowedTabs, tab]);
 
       const viewReadOnly = menuPerms[tab]?.editable === false;
-      const editingLocked = prog.running || viewReadOnly;
+      const editingLocked = prog.running || viewReadOnly || historyViewing;
       useEffect(()=>{ setVersions([]); }, [team]);
 
       const menuLabels = {
@@ -1762,6 +1782,8 @@
         setHistoryProfile(snapshot.historyProfile || null);
         setYearlyOptimize(snapshot.yearlyOptimize === true);
         const realtimeFlag = payload && (payload.realtime === true || payload.realtime === 1);
+        const historyView = payload && payload.__history === true;
+        setHistoryViewing(historyView);
         setRealtimeEnabled(realtimeFlag);
         const liveVer = typeof payload?.liveVersion === 'number' ? payload.liveVersion : 0;
         setLiveVersion(liveVer);
@@ -1773,6 +1795,8 @@
         setCellMeta(cellMetaPayload);
         pendingCountsRef.current = {};
         pendingOpsRef.current.clear();
+        setPendingOpsTick(t=> t + 1);
+        setConflictHints({});
         const payloadUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : (typeof payload?.updated_at === 'string' ? payload.updated_at : (snapshot.updatedAt || null));
         const payloadBackupAt = typeof payload?.lastBackupAt === 'string' ? payload.lastBackupAt : (typeof payload?.last_backup_at === 'string' ? payload.last_backup_at : (snapshot.lastBackupAt || null));
         setServerUpdatedAt(payloadUpdatedAt || null);
@@ -1813,7 +1837,8 @@
           store[day] = dayMap;
         }
         pendingCountsRef.current = store;
-      }, []);
+        setPendingOpsTick(t=> t + 1);
+      }, [setPendingOpsTick]);
 
       const predictedVersionOf = useCallback((day, emp)=>{
         const baseMap = cellVersionsRef.current || {};
@@ -1848,6 +1873,49 @@
         }
         return updates;
       }, [employees]);
+
+      const removeConflict = useCallback((day, emp)=>{
+        if(!day || !emp) return;
+        setConflictHints(prev => {
+          const row = prev[day];
+          if(!row || !row[emp]) return prev;
+          const next = { ...prev };
+          const map = { ...row };
+          delete map[emp];
+          if(Object.keys(map).length === 0){
+            delete next[day];
+          } else {
+            next[day] = map;
+          }
+          return next;
+        });
+        const key = `${day}__${emp}`;
+        const timers = conflictTimersRef.current;
+        if(timers.has(key)){
+          clearTimeout(timers.get(key));
+          timers.delete(key);
+        }
+      }, []);
+
+      const noteConflict = useCallback((day, emp, info = {})=>{
+        if(!day || !emp) return;
+        setConflictHints(prev => {
+          const next = { ...prev };
+          const map = { ...(next[day] || {}) };
+          map[emp] = info;
+          next[day] = map;
+          return next;
+        });
+        const key = `${day}__${emp}`;
+        const timers = conflictTimersRef.current;
+        if(timers.has(key)){
+          clearTimeout(timers.get(key));
+        }
+        const timer = setTimeout(()=>{
+          removeConflict(day, emp);
+        }, 8000);
+        timers.set(key, timer);
+      }, [removeConflict]);
 
       const postOps = useCallback(async (opsPayload)=>{
         const trimmedTeam = (team || '').trim();
@@ -1888,6 +1956,7 @@
           revertPayload.push({ day, emp, value: previous });
         }
         if(!opsPayload.length) return;
+        setPendingOpsTick(t=> t + 1);
         postOps(opsPayload).then(res=>{
           if(res && typeof res.liveVersion === 'number'){ setLiveVersion(res.liveVersion); }
           const results = Array.isArray(res?.results) ? res.results : [];
@@ -1919,6 +1988,18 @@
                 next[day] = map;
               });
               return next;
+            });
+            results.forEach(item=>{
+              if(!item || typeof item !== 'object') return;
+              const day = item.day;
+              const emp = item.emp;
+              if(!day || !emp) return;
+              removeConflict(day, emp);
+              if(item.conflict){
+                const updater = item.updatedBy || item.actor || '';
+                const message = updater ? `已由 ${updater} 更新` : '该单元格已被他人更新';
+                noteConflict(day, emp, { message, updatedBy: updater, at: item.updatedAt || null });
+              }
             });
             const corrections = [];
             results.forEach(item=>{
@@ -1985,8 +2066,9 @@
           });
         lastSyncedDataRef.current = dataRef.current;
         showToast(err?.message || '实时写入失败', 'error', 4000);
+        setPendingOpsTick(t=> t + 1);
       });
-    }, [realtimeEnabled, team, predictedVersionOf, postOps, adjustPendingCount, showToast]);
+    }, [realtimeEnabled, team, predictedVersionOf, postOps, adjustPendingCount, showToast, removeConflict, noteConflict]);
 
       const handleIncomingOp = useCallback((payload)=>{
         if(!payload || typeof payload !== 'object') return;
@@ -2003,6 +2085,7 @@
         } else if(payload.clientId && payload.clientId === clientIdRef.current){
           adjustPendingCount(day, emp, -1);
         }
+        setPendingOpsTick(t=> t + 1);
         if(typeof payload.serverVersion === 'number'){ setLiveVersion(payload.serverVersion); }
         skipRealtimeSyncRef.current = true;
         setData(prev=>{
@@ -2034,20 +2117,31 @@
           next[day] = map;
           return next;
         });
-      }, [adjustPendingCount]);
+        removeConflict(day, emp);
+        if(payload.conflict){
+          const updater = payload.updatedBy || payload.actor || '';
+          const message = updater ? `已由 ${updater} 更新` : '该单元格已被他人更新';
+          noteConflict(day, emp, { message, updatedBy: updater, at: payload.at || null });
+        }
+      }, [adjustPendingCount, noteConflict, removeConflict]);
 
       useEffect(()=>{
         if(liveChannelRef.current){
           liveChannelRef.current.close();
           liveChannelRef.current = null;
         }
-        if(!realtimeEnabled) return;
+        if(!realtimeEnabled || historyViewing){
+          return;
+        }
         const trimmedTeam = (team || '').trim();
         if(!trimmedTeam) return;
+        setLiveConnected(false);
         const channel = new LiveChannel({
           team: trimmedTeam,
           since: liveSinceRef.current || 0,
           onOp: handleIncomingOp,
+          onOpen: ()=> setLiveConnected(true),
+          onError: ()=> setLiveConnected(false),
         });
         liveChannelRef.current = channel;
         channel.start();
@@ -2056,8 +2150,24 @@
           if(liveChannelRef.current === channel){
             liveChannelRef.current = null;
           }
+          setLiveConnected(false);
         };
-      }, [realtimeEnabled, team, handleIncomingOp]);
+      }, [realtimeEnabled, historyViewing, team, handleIncomingOp]);
+
+      useEffect(()=>{
+        if(!realtimeEnabled || historyViewing){
+          setIsLiveReady(false);
+          isLiveReadyRef.current = false;
+          return;
+        }
+        const hasPendingOps = pendingOpsRef.current && pendingOpsRef.current.size > 0;
+        const counts = pendingCountsRef.current || {};
+        const hasPendingCounts = Object.values(counts).some(map=> map && Object.keys(map).length);
+        const behind = (liveSinceRef.current || 0) < (liveVersion || 0);
+        const ready = liveConnected && !hasPendingOps && !hasPendingCounts && !behind;
+        setIsLiveReady(ready);
+        isLiveReadyRef.current = ready;
+      }, [realtimeEnabled, historyViewing, liveConnected, liveVersion, pendingOpsTick]);
 
       useEffect(()=>{
         if(!realtimeEnabled){
@@ -2114,8 +2224,8 @@
           historyProfile,
           yearlyOptimize
         };
-        const noteValue = options.noteOverride !== undefined ? options.noteOverride : (base.note ?? note);
-        return {
+       const noteValue = options.noteOverride !== undefined ? options.noteOverride : (base.note ?? note);
+        const payload = {
           team,
           viewStart: base.viewStart || viewStart,
           viewEnd: base.viewEnd || viewEnd,
@@ -2151,6 +2261,10 @@
           historyProfile: base.historyProfile ?? historyProfile,
           yearlyOptimize: base.yearlyOptimize ?? yearlyOptimize
         };
+        if(realtimeEnabled){
+          delete payload.data;
+        }
+        return payload;
       }
 
       function safeParseSnapshot(serialized){
@@ -2292,6 +2406,8 @@
 
       async function triggerAutoSave(reason, options = {}){
         const { waitForResponse = false } = options;
+        if(historyViewing) return false;
+        if(realtimeEnabled && !isLiveReadyRef.current) return false;
         if(autoSaveSendingRef.current) return false;
         if(!pendingAutoSaveRef.current) return false;
         const snapshot = snapshotRef.current;
@@ -2455,7 +2571,7 @@
           setVersions(list);
           if(list.length){
             const latestId = list[0]?.id;
-            if(latestId && lastLoadedVersionRef.current[trimmedTeam] !== latestId){
+            if(latestId && (!realtimeEnabled || historyViewing) && lastLoadedVersionRef.current[trimmedTeam] !== latestId){
               await loadVersionById(latestId, { silent:true });
             }
           } else {
@@ -2470,12 +2586,57 @@
       async function loadVersionById(id, options={}){
         try{
           const res = await apiGet(`/version?id=${id}`);
-          applyServerState({ ...res, versionId: id });
+          applyServerState({ ...res, versionId: id, __history: true });
           lastLoadedVersionRef.current[team] = id;
         } catch(e){
           if(!options?.silent){
             globalErr(e.message);
           }
+        }
+      }
+      async function restoreVersionById(id){
+        if(!realtimeEnabled){
+          globalErr('当前未启用实时协作，无法创建新版本。');
+          return;
+        }
+        const trimmedTeam = (team || '').trim();
+        if(!trimmedTeam){
+          globalErr('请选择团队后再操作');
+          return;
+        }
+        if(!id) return;
+        if(versionRestoringId){
+          return;
+        }
+        if(!confirm('确定基于该历史版本创建一个新版本并写入当前排班？原历史记录将保留。')) return;
+        setVersionRestoringId(id);
+        try{
+          const payload = {
+            team: trimmedTeam,
+            versionId: id,
+            operator: formatOperatorLabel(user),
+          };
+          if(versionId != null){
+            payload.baseVersionId = versionId;
+          }
+          const res = await apiPost('/schedule/version/restore', payload);
+          showToast('已基于历史版本生成新版本', 'success');
+          setHistoryViewing(false);
+          await loadFromServer();
+          await loadVersions();
+          if(res && typeof res.liveVersion === 'number'){
+            liveSinceRef.current = res.liveVersion;
+            setLiveVersion(res.liveVersion);
+          }
+          const newVersion = (res && (res.versionId || res.version_id)) || null;
+          if(newVersion != null){
+            setVersionId(newVersion);
+            lastLoadedVersionRef.current[trimmedTeam] = newVersion;
+          }
+        } catch(e){
+          globalErr(e?.message || '恢复历史版本失败');
+        } finally {
+          setVersionRestoringId(null);
         }
       }
       async function deleteVersionById(id){
@@ -2759,6 +2920,7 @@
         const d = dateList[dIndex];
         const emp = employees[eIndex];
         if(!d || !emp) return;
+        removeConflict(d, emp);
         setData(prev=>{
           const next = { ...prev };
           const row = { ...(next[d]||{}) };
@@ -2766,7 +2928,7 @@
           next[d] = row;
           return next;
         });
-      }, [dateList, employees]);
+      }, [dateList, employees, removeConflict]);
       const onFocusCell = useCallback((dIndex, eIndex)=>{ activeCellRef.current = { dIndex, eIndex }; }, []);
       const dateCount = dateList.length;
       const empCount = employees.length;
@@ -2866,9 +3028,12 @@
         openPickerAt,
         setCellByIndex,
         rowRef,
-        measureCell
+        measureCell,
+        conflictMap,
+        onClearConflict
       }){
         const dataRow = rowData || EMPTY_ROW;
+        const conflictRow = conflictMap && typeof conflictMap === 'object' ? conflictMap : EMPTY_ROW;
         const stats = useMemo(()=>{
           let total = 0; let white = 0; let mid1 = 0; let mid2 = 0; let night = 0;
           for(const emp of employeesList){
@@ -2916,6 +3081,7 @@
               const value = dataRow[emp] || '';
               const bg = shiftColors[value] || undefined;
               const cellRef = offset === 0 && measureCell ? measureCell : null;
+              const conflictInfo = conflictRow[emp];
               return (
                 <td key={emp} className="py-1.5 px-3" ref={cellRef}>
                   <div className="cell-wrap">
@@ -2933,6 +3099,13 @@
                       onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
                       <span className="sr-only">打开班次选择器</span>
                     </button>
+                    {conflictInfo && (
+                      <button type="button" className="absolute top-1 right-1 rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-medium text-white shadow focus:outline-none focus:ring-2 focus:ring-amber-300"
+                        title={conflictInfo.message || '该单元格已被他人更新'}
+                        onClick={()=> onClearConflict && onClearConflict(day, emp)}>
+                        冲突
+                      </button>
+                    )}
                   </div>
                 </td>
               );
@@ -3066,6 +3239,12 @@
             <div className="text-sm text-gray-500">请先在「员工管理」中添加员工。</div>
           ) : (
             <>
+              {historyViewing && (
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+                  <span>当前正在预览历史备份（版本 ID {versionId ?? '—'}），排班表暂时只读。</span>
+                  <button type="button" className="inline-flex items-center rounded-full bg-amber-500 px-3 py-1 text-white shadow hover:bg-amber-400" onClick={loadFromServer}>返回实时视图</button>
+                </div>
+              )}
               <div
                 ref={gridContainerRef}
                 className="grid-wrap border rounded-xl shadow-inner"
@@ -3147,6 +3326,8 @@
                           setCellByIndex={setCellByIndex}
                           rowRef={rowRef}
                           measureCell={cellMeasure}
+                          conflictMap={conflictHints[d] || EMPTY_ROW}
+                          onClearConflict={removeConflict}
                         />
                       );
                     })}
@@ -4536,6 +4717,7 @@
                     const operator = operatorRaw || '管理员';
                     const isAuto = isAutoSaveLabel(operatorRaw);
                     const deleting = versionDeletingId === v.id;
+                    const restoring = versionRestoringId === v.id;
                     return (
                       <tr key={v.id} className="border-t hover:bg-gray-50">
                         <td className="py-1 px-3">
@@ -4550,8 +4732,18 @@
                         </td>
                         <td className="py-1 px-3 text-gray-600">{remark || '—'}</td>
                         <td className="py-1 px-3">
-                          <div className="flex items-center gap-3">
-                            <button type="button" className="text-indigo-600 hover:underline disabled:text-gray-400 disabled:no-underline" onClick={()=>loadVersionById(v.id)} disabled={versionsLoading || deleting}>载入</button>
+                          <div className="flex flex-wrap items-center gap-3">
+                            {realtimeEnabled && (
+                              <button
+                                type="button"
+                                className="flex items-center gap-1 text-emerald-600 hover:underline disabled:text-emerald-300 disabled:no-underline"
+                                onClick={()=> restoreVersionById(v.id)}
+                                disabled={deleting || restoring || versionsLoading || prog.running}
+                              >
+                                {restoring ? (<><Spinner className="w-3.5 h-3.5 text-emerald-500" /><span>创建中…</span></>) : '基于此版本创建新版本'}
+                              </button>
+                            )}
+                            <button type="button" className="text-indigo-600 hover:underline disabled:text-gray-400 disabled:no-underline" onClick={()=>loadVersionById(v.id)} disabled={versionsLoading || deleting}>预览</button>
                             <button type="button" className="flex items-center gap-1 text-rose-600 hover:underline disabled:text-rose-300 disabled:no-underline" onClick={()=>deleteVersionById(v.id)} disabled={deleting || versionsLoading}>
                               {deleting ? (<><Spinner className="w-3.5 h-3.5 text-rose-500" /><span>删除中</span></>) : '删除'}
                             </button>
