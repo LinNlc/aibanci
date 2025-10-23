@@ -155,6 +155,91 @@
     async function apiGet(path){ const r = await fetch(API_BASE + path, { credentials: 'include' }); if(!r.ok){ let msg='请求失败'; try { const e=await r.json(); msg=e.message||msg; } catch{} throw new Error(msg); } return r.json(); }
     async function apiPost(path, body){ const r = await fetch(API_BASE + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body||{}), credentials: 'include' }); if(!r.ok){ let ejson=null; try { ejson = await r.json(); } catch{} const err = new Error((ejson&&ejson.message)||'请求失败'); if(ejson) err.payload = ejson; throw err; } return r.json(); }
 
+    const REALTIME_CLIENT_ID_KEY = 'scheduler_live_client_id_v1';
+    function getRealtimeClientId(){
+      try {
+        const stored = window.localStorage.getItem(REALTIME_CLIENT_ID_KEY);
+        if(stored) return stored;
+      } catch(err){ /* ignore */ }
+      const generated = `web#${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+      try { window.localStorage.setItem(REALTIME_CLIENT_ID_KEY, generated); } catch(err){ /* ignore */ }
+      return generated;
+    }
+
+    class LiveChannel {
+      constructor({ team, since = 0, onOp, onSnapshot, onPresence, onError, onOpen }){
+        this.team = team;
+        this.since = typeof since === 'number' && Number.isFinite(since) ? since : 0;
+        this.onOp = onOp;
+        this.onSnapshot = onSnapshot;
+        this.onPresence = onPresence;
+        this.onError = onError;
+        this.onOpen = onOpen;
+        this.es = null;
+        this.closed = false;
+        this.retryDelay = 2000;
+      }
+      start(){
+        this.closed = false;
+        this.connect();
+      }
+      connect(){
+        if(this.closed) return;
+        if(this.es){
+          try { this.es.close(); } catch(err){}
+          this.es = null;
+        }
+        const params = new URLSearchParams();
+        params.set('team', this.team);
+        if(this.since > 0){
+          params.set('since', String(this.since));
+        }
+        const url = `${API_BASE}/events?${params.toString()}`;
+        const es = new EventSource(url, { withCredentials: true });
+        this.es = es;
+        es.onopen = () => {
+          this.retryDelay = 2000;
+          if(typeof this.onOpen === 'function') this.onOpen();
+        };
+        es.onerror = () => {
+          if(typeof this.onError === 'function') this.onError();
+          if(this.es){
+            try { this.es.close(); } catch(err){}
+            this.es = null;
+          }
+          if(this.closed) return;
+          const delay = this.retryDelay;
+          this.retryDelay = Math.min(this.retryDelay * 1.5, 15000);
+          setTimeout(()=> this.connect(), delay);
+        };
+        es.addEventListener('op', (event)=>{
+          if(!event?.data) return;
+          try {
+            const payload = JSON.parse(event.data);
+            if(payload && typeof payload.serverVersion === 'number'){ this.since = Math.max(this.since, payload.serverVersion); }
+            if(typeof this.onOp === 'function') this.onOp(payload || {});
+          } catch(err){ console.warn('parse op event failed', err); }
+        });
+        es.addEventListener('snapshot', (event)=>{
+          if(typeof this.onSnapshot === 'function'){
+            try { this.onSnapshot(event?.data ? JSON.parse(event.data) : {}); } catch(err){ this.onSnapshot({}); }
+          }
+        });
+        es.addEventListener('presence', (event)=>{
+          if(typeof this.onPresence === 'function'){
+            try { this.onPresence(event?.data ? JSON.parse(event.data) : {}); } catch(err){ this.onPresence({}); }
+          }
+        });
+      }
+      close(){
+        this.closed = true;
+        if(this.es){
+          try { this.es.close(); } catch(err){}
+        }
+        this.es = null;
+      }
+    }
+
     const isWork = (v)=> !!(v && v!=='休');
     function getVal(data, day, emp){ return (data[day]||{})[emp]||''; }
     function setVal(map, day, emp, val){ const row = { ...(map[day]||{}) }; row[emp] = val; map[day] = row; }
@@ -917,6 +1002,15 @@
       const viewManuallyAdjustedRef = useRef(false);
       const [employees, setEmployees] = useState([]);
       const [data, setData] = useState({});
+      const [realtimeEnabled, setRealtimeEnabled] = useState(false);
+      const [liveVersion, setLiveVersion] = useState(0);
+      const [cellVersions, setCellVersions] = useState({});
+      const [cellMeta, setCellMeta] = useState({});
+      const [historyViewing, setHistoryViewing] = useState(false);
+      const [liveConnected, setLiveConnected] = useState(false);
+      const [pendingOpsTick, setPendingOpsTick] = useState(0);
+      const [isLiveReady, setIsLiveReady] = useState(false);
+      const [conflictHints, setConflictHints] = useState({});
       const [versionId, setVersionId] = useState(null);
       const [versions, setVersions]   = useState([]);
       const [versionsLoading, setVersionsLoading] = useState(false);
@@ -953,6 +1047,8 @@
           return !isAutoSaveLabel(operator);
         });
       }, [versions, showAutoSaves]);
+      const actorName = useMemo(()=> (user?.display_name || user?.displayName || user?.username || '管理员'), [user]);
+      const [versionRestoringId, setVersionRestoringId] = useState(null);
       const [versionDeletingId, setVersionDeletingId] = useState(null);
       const [toast, setToast] = useState(null);
       const toastTimerRef = useRef(null);
@@ -967,6 +1063,28 @@
         setToast({ message, type });
         toastTimerRef.current = setTimeout(()=> setToast(null), duration);
       };
+
+      useEffect(()=>{ cellVersionsRef.current = cellVersions; }, [cellVersions]);
+      useEffect(()=>{ dataRef.current = data; }, [data]);
+      useEffect(()=>{
+        if(!realtimeEnabled){
+          pendingCountsRef.current = {};
+          pendingOpsRef.current.clear();
+          setPendingOpsTick(t=> t + 1);
+        }
+      }, [realtimeEnabled]);
+      useEffect(()=>{ liveSinceRef.current = liveVersion; }, [liveVersion]);
+      useEffect(()=>{
+        return ()=>{
+          conflictTimersRef.current.forEach(timer=> clearTimeout(timer));
+          conflictTimersRef.current.clear();
+        };
+      }, []);
+      useEffect(()=>{
+        if(!realtimeEnabled || historyViewing){
+          setLiveConnected(false);
+        }
+      }, [realtimeEnabled, historyViewing]);
 
       const [prog, setProg] = useState({ running:false, stage:'', done:0, total:100 });
       const [logs, setLogs] = useState([]);
@@ -993,6 +1111,18 @@
       const [accountPasswordDrafts, setAccountPasswordDrafts] = useState({});
       const [accountDisplayDrafts, setAccountDisplayDrafts] = useState({});
       const importInputRef = useRef(null);
+      const cellVersionsRef = useRef(cellVersions);
+      const dataRef = useRef(data);
+      const skipRealtimeSyncRef = useRef(false);
+      const lastSyncedDataRef = useRef(data);
+      const pendingCountsRef = useRef({});
+      const pendingOpsRef = useRef(new Map());
+      const conflictTimersRef = useRef(new Map());
+      const clientIdRef = useRef(getRealtimeClientId());
+      const clientSeqRef = useRef(0);
+      const liveChannelRef = useRef(null);
+      const liveSinceRef = useRef(0);
+      const isLiveReadyRef = useRef(false);
       const [importing, setImporting] = useState(false);
 
       useEffect(()=>{
@@ -1278,7 +1408,7 @@
       }, [allowedTabs, tab]);
 
       const viewReadOnly = menuPerms[tab]?.editable === false;
-      const editingLocked = prog.running || viewReadOnly;
+      const editingLocked = prog.running || viewReadOnly || historyViewing;
       useEffect(()=>{ setVersions([]); }, [team]);
 
       const menuLabels = {
@@ -1621,7 +1751,10 @@
         setViewStart(snapshot.viewStart);
         setViewEnd(snapshot.viewEnd);
         setEmployees(Array.isArray(snapshot.employees) ? snapshot.employees.slice() : []);
-        setData(snapshot.data || {});
+        skipRealtimeSyncRef.current = true;
+        const normalizedData = snapshot.data || {};
+        setData(normalizedData);
+        lastSyncedDataRef.current = normalizedData;
         setVersionId(snapshot.versionId || null);
         setShiftColors({ ...snapshot.shiftColors });
         setStaffingAlerts({ ...snapshot.staffingAlerts });
@@ -1648,6 +1781,22 @@
         setAlbumHistory(Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []);
         setHistoryProfile(snapshot.historyProfile || null);
         setYearlyOptimize(snapshot.yearlyOptimize === true);
+        const realtimeFlag = payload && (payload.realtime === true || payload.realtime === 1);
+        const historyView = payload && payload.__history === true;
+        setHistoryViewing(historyView);
+        setRealtimeEnabled(realtimeFlag);
+        const liveVer = typeof payload?.liveVersion === 'number' ? payload.liveVersion : 0;
+        setLiveVersion(liveVer);
+        liveSinceRef.current = liveVer;
+        const versionsPayload = payload && payload.cellVersions && typeof payload.cellVersions === 'object' ? payload.cellVersions : {};
+        setCellVersions(versionsPayload);
+        cellVersionsRef.current = versionsPayload;
+        const cellMetaPayload = payload && payload.cellMeta && typeof payload.cellMeta === 'object' ? payload.cellMeta : {};
+        setCellMeta(cellMetaPayload);
+        pendingCountsRef.current = {};
+        pendingOpsRef.current.clear();
+        setPendingOpsTick(t=> t + 1);
+        setConflictHints({});
         const payloadUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : (typeof payload?.updated_at === 'string' ? payload.updated_at : (snapshot.updatedAt || null));
         const payloadBackupAt = typeof payload?.lastBackupAt === 'string' ? payload.lastBackupAt : (typeof payload?.last_backup_at === 'string' ? payload.last_backup_at : (snapshot.lastBackupAt || null));
         setServerUpdatedAt(payloadUpdatedAt || null);
@@ -1671,6 +1820,374 @@
         lastSavedSnapshotRef.current = JSON.stringify(snapshotClone);
         pendingAutoSaveRef.current = false;
       }
+
+      const adjustPendingCount = useCallback((day, emp, delta)=>{
+        if(!day || !emp || !delta) return;
+        const store = pendingCountsRef.current || {};
+        const dayMap = store[day] ? { ...store[day] } : {};
+        const next = Math.max(0, (dayMap[emp] || 0) + delta);
+        if(next <= 0){
+          delete dayMap[emp];
+        } else {
+          dayMap[emp] = next;
+        }
+        if(Object.keys(dayMap).length === 0){
+          delete store[day];
+        } else {
+          store[day] = dayMap;
+        }
+        pendingCountsRef.current = store;
+        setPendingOpsTick(t=> t + 1);
+      }, [setPendingOpsTick]);
+
+      const predictedVersionOf = useCallback((day, emp)=>{
+        const baseMap = cellVersionsRef.current || {};
+        const dayMap = baseMap[day] || {};
+        const base = typeof dayMap[emp] === 'number' ? dayMap[emp] : 0;
+        const pendingMap = pendingCountsRef.current || {};
+        const pendingDay = pendingMap[day] || {};
+        const pending = typeof pendingDay[emp] === 'number' ? pendingDay[emp] : 0;
+        return base + pending;
+      }, []);
+
+      const collectDiff = useCallback((prevData, nextData)=>{
+        const updates = [];
+        const prevKeys = prevData ? Object.keys(prevData) : [];
+        const nextKeys = nextData ? Object.keys(nextData) : [];
+        const daySet = new Set([...prevKeys, ...nextKeys]);
+        for(const day of daySet){
+          if(typeof day !== 'string') continue;
+          const prevRow = (prevData && prevData[day]) || {};
+          const nextRow = (nextData && nextData[day]) || {};
+          const emps = new Set([...Object.keys(prevRow||{}), ...Object.keys(nextRow||{}), ...employees]);
+          for(const emp of emps){
+            if(!emp) continue;
+            const prevValRaw = prevRow && Object.prototype.hasOwnProperty.call(prevRow, emp) ? prevRow[emp] : '';
+            const nextValRaw = nextRow && Object.prototype.hasOwnProperty.call(nextRow, emp) ? nextRow[emp] : '';
+            const prevVal = typeof prevValRaw === 'string' ? prevValRaw : (prevValRaw == null ? '' : String(prevValRaw));
+            const nextVal = typeof nextValRaw === 'string' ? nextValRaw : (nextValRaw == null ? '' : String(nextValRaw));
+            if(prevVal !== nextVal){
+              updates.push({ day, emp, value: nextVal, previous: prevVal });
+            }
+          }
+        }
+        return updates;
+      }, [employees]);
+
+      const removeConflict = useCallback((day, emp)=>{
+        if(!day || !emp) return;
+        setConflictHints(prev => {
+          const row = prev[day];
+          if(!row || !row[emp]) return prev;
+          const next = { ...prev };
+          const map = { ...row };
+          delete map[emp];
+          if(Object.keys(map).length === 0){
+            delete next[day];
+          } else {
+            next[day] = map;
+          }
+          return next;
+        });
+        const key = `${day}__${emp}`;
+        const timers = conflictTimersRef.current;
+        if(timers.has(key)){
+          clearTimeout(timers.get(key));
+          timers.delete(key);
+        }
+      }, []);
+
+      const noteConflict = useCallback((day, emp, info = {})=>{
+        if(!day || !emp) return;
+        setConflictHints(prev => {
+          const next = { ...prev };
+          const map = { ...(next[day] || {}) };
+          map[emp] = info;
+          next[day] = map;
+          return next;
+        });
+        const key = `${day}__${emp}`;
+        const timers = conflictTimersRef.current;
+        if(timers.has(key)){
+          clearTimeout(timers.get(key));
+        }
+        const timer = setTimeout(()=>{
+          removeConflict(day, emp);
+        }, 8000);
+        timers.set(key, timer);
+      }, [removeConflict]);
+
+      const postOps = useCallback(async (opsPayload)=>{
+        const trimmedTeam = (team || '').trim();
+        if(!trimmedTeam) return { results: [] };
+        return apiPost('/ops', { team: trimmedTeam, ops: opsPayload, actor: actorName });
+      }, [team, actorName]);
+
+      const submitOps = useCallback((diffs)=>{
+        if(!realtimeEnabled) return;
+        if(!Array.isArray(diffs) || diffs.length === 0) return;
+        const trimmedTeam = (team || '').trim();
+        if(!trimmedTeam) return;
+        const clientId = clientIdRef.current || getRealtimeClientId();
+        clientIdRef.current = clientId;
+        const opsPayload = [];
+        const revertPayload = [];
+        const pendingKeys = [];
+        for(const diff of diffs){
+          if(!diff || typeof diff !== 'object') continue;
+          const { day, emp, value, previous } = diff;
+          if(!day || !emp) continue;
+          const baseVersion = predictedVersionOf(day, emp);
+          const seq = (clientSeqRef.current || 0) + 1;
+          clientSeqRef.current = seq;
+          const key = `${clientId}:${seq}`;
+          pendingOpsRef.current.set(key, { day, emp, acknowledged: false });
+          adjustPendingCount(day, emp, 1);
+          opsPayload.push({
+            day,
+            emp,
+            to: value === undefined ? '' : value,
+            from: previous === undefined ? '' : previous,
+            baseCellVersion: baseVersion,
+            clientId,
+            clientSeq: seq,
+          });
+          pendingKeys.push(key);
+          revertPayload.push({ day, emp, value: previous });
+        }
+        if(!opsPayload.length) return;
+        setPendingOpsTick(t=> t + 1);
+        postOps(opsPayload).then(res=>{
+          if(res && typeof res.liveVersion === 'number'){ setLiveVersion(res.liveVersion); }
+          const results = Array.isArray(res?.results) ? res.results : [];
+          if(results.length){
+            setCellVersions(prev=>{
+              const next = { ...prev };
+              results.forEach(item=>{
+                if(!item || typeof item !== 'object') return;
+                const day = item.day;
+                const emp = item.emp;
+                if(!day || !emp) return;
+                const map = { ...(next[day] || {}) };
+                if(typeof item.appliedCellVersion === 'number'){
+                  map[emp] = item.appliedCellVersion;
+                }
+                next[day] = map;
+              });
+              return next;
+            });
+            setCellMeta(prev=>{
+              const next = { ...prev };
+              results.forEach(item=>{
+                if(!item || typeof item !== 'object') return;
+                const day = item.day;
+                const emp = item.emp;
+                if(!day || !emp) return;
+                const map = { ...(next[day] || {}) };
+                map[emp] = { updated_at: item.updatedAt || null, updated_by: item.updatedBy || null };
+                next[day] = map;
+              });
+              return next;
+            });
+            results.forEach(item=>{
+              if(!item || typeof item !== 'object') return;
+              const day = item.day;
+              const emp = item.emp;
+              if(!day || !emp) return;
+              removeConflict(day, emp);
+              if(item.conflict){
+                const updater = item.updatedBy || item.actor || '';
+                const message = updater ? `已由 ${updater} 更新` : '该单元格已被他人更新';
+                noteConflict(day, emp, { message, updatedBy: updater, at: item.updatedAt || null });
+              }
+            });
+            const corrections = [];
+            results.forEach(item=>{
+              if(!item || typeof item !== 'object') return;
+              const day = item.day;
+              const emp = item.emp;
+              if(!day || !emp) return;
+              const resultVal = item.value === undefined || item.value === null ? '' : String(item.value);
+              const currentVal = getVal(dataRef.current || {}, day, emp);
+              if(resultVal !== currentVal){
+                corrections.push({ day, emp, value: resultVal });
+              }
+            });
+            if(corrections.length){
+              skipRealtimeSyncRef.current = true;
+              setData(prev=>{
+                const next = { ...prev };
+                corrections.forEach(({ day, emp, value })=>{
+                  const row = { ...(next[day] || {}) };
+                  if(value === ''){
+                    delete row[emp];
+                  } else {
+                    row[emp] = value;
+                  }
+                  next[day] = row;
+                });
+                return next;
+              });
+            }
+            results.forEach(item=>{
+              if(!item) return;
+              const key = `${item.clientId || ''}:${typeof item.clientSeq === 'number' ? item.clientSeq : ''}`;
+              const entry = pendingOpsRef.current.get(key);
+              if(entry){ entry.acknowledged = true; }
+            });
+            const conflicts = results.filter(item=> item && item.conflict);
+            if(conflicts.length){
+              showToast('部分单元格已被他人更新，已同步最新结果', 'warning', 4000);
+            }
+          }
+        }).catch(err=>{
+          pendingKeys.forEach(key=>{
+            const entry = pendingOpsRef.current.get(key);
+            if(entry){
+              adjustPendingCount(entry.day, entry.emp, -1);
+              pendingOpsRef.current.delete(key);
+            }
+          });
+          skipRealtimeSyncRef.current = true;
+          setData(prev=>{
+            const next = { ...prev };
+            for(const revert of revertPayload){
+              const { day, emp, value } = revert;
+              if(!day || !emp) continue;
+              const row = { ...(next[day] || {}) };
+              if(value === '' || value == null){
+                delete row[emp];
+              } else {
+                row[emp] = value;
+              }
+              next[day] = row;
+            }
+            return next;
+          });
+        lastSyncedDataRef.current = dataRef.current;
+        showToast(err?.message || '实时写入失败', 'error', 4000);
+        setPendingOpsTick(t=> t + 1);
+      });
+    }, [realtimeEnabled, team, predictedVersionOf, postOps, adjustPendingCount, showToast, removeConflict, noteConflict]);
+
+      const handleIncomingOp = useCallback((payload)=>{
+        if(!payload || typeof payload !== 'object') return;
+        const day = payload.day;
+        const emp = payload.emp;
+        if(!day || !emp) return;
+        const valueRaw = payload.to;
+        const value = typeof valueRaw === 'string' ? valueRaw : (valueRaw == null ? '' : String(valueRaw));
+        const key = `${payload.clientId || ''}:${typeof payload.clientSeq === 'number' ? payload.clientSeq : ''}`;
+        const entry = pendingOpsRef.current.get(key);
+        if(entry){
+          adjustPendingCount(entry.day, entry.emp, -1);
+          pendingOpsRef.current.delete(key);
+        } else if(payload.clientId && payload.clientId === clientIdRef.current){
+          adjustPendingCount(day, emp, -1);
+        }
+        setPendingOpsTick(t=> t + 1);
+        if(typeof payload.serverVersion === 'number'){ setLiveVersion(payload.serverVersion); }
+        skipRealtimeSyncRef.current = true;
+        setData(prev=>{
+          const next = { ...prev };
+          const row = { ...(next[day] || {}) };
+          if(value === ''){
+            delete row[emp];
+          } else {
+            row[emp] = value;
+          }
+          next[day] = row;
+          return next;
+        });
+        setCellVersions(prev=>{
+          const next = { ...prev };
+          const map = { ...(next[day] || {}) };
+          if(typeof payload.cellVersion === 'number'){
+            map[emp] = payload.cellVersion;
+          } else if(typeof payload.appliedCellVersion === 'number'){
+            map[emp] = payload.appliedCellVersion;
+          }
+          next[day] = map;
+          return next;
+        });
+        setCellMeta(prev=>{
+          const next = { ...prev };
+          const map = { ...(next[day] || {}) };
+          map[emp] = { updated_at: payload.at || null, updated_by: payload.updatedBy || null };
+          next[day] = map;
+          return next;
+        });
+        removeConflict(day, emp);
+        if(payload.conflict){
+          const updater = payload.updatedBy || payload.actor || '';
+          const message = updater ? `已由 ${updater} 更新` : '该单元格已被他人更新';
+          noteConflict(day, emp, { message, updatedBy: updater, at: payload.at || null });
+        }
+      }, [adjustPendingCount, noteConflict, removeConflict]);
+
+      useEffect(()=>{
+        if(liveChannelRef.current){
+          liveChannelRef.current.close();
+          liveChannelRef.current = null;
+        }
+        if(!realtimeEnabled || historyViewing){
+          return;
+        }
+        const trimmedTeam = (team || '').trim();
+        if(!trimmedTeam) return;
+        setLiveConnected(false);
+        const channel = new LiveChannel({
+          team: trimmedTeam,
+          since: liveSinceRef.current || 0,
+          onOp: handleIncomingOp,
+          onOpen: ()=> setLiveConnected(true),
+          onError: ()=> setLiveConnected(false),
+        });
+        liveChannelRef.current = channel;
+        channel.start();
+        return ()=>{
+          channel.close();
+          if(liveChannelRef.current === channel){
+            liveChannelRef.current = null;
+          }
+          setLiveConnected(false);
+        };
+      }, [realtimeEnabled, historyViewing, team, handleIncomingOp]);
+
+      useEffect(()=>{
+        if(!realtimeEnabled || historyViewing){
+          setIsLiveReady(false);
+          isLiveReadyRef.current = false;
+          return;
+        }
+        const hasPendingOps = pendingOpsRef.current && pendingOpsRef.current.size > 0;
+        const counts = pendingCountsRef.current || {};
+        const hasPendingCounts = Object.values(counts).some(map=> map && Object.keys(map).length);
+        const behind = (liveSinceRef.current || 0) < (liveVersion || 0);
+        const ready = liveConnected && !hasPendingOps && !hasPendingCounts && !behind;
+        setIsLiveReady(ready);
+        isLiveReadyRef.current = ready;
+      }, [realtimeEnabled, historyViewing, liveConnected, liveVersion, pendingOpsTick]);
+
+      useEffect(()=>{
+        if(!realtimeEnabled){
+          lastSyncedDataRef.current = data;
+          return;
+        }
+        if(skipRealtimeSyncRef.current){
+          skipRealtimeSyncRef.current = false;
+          lastSyncedDataRef.current = data;
+          return;
+        }
+        const prev = lastSyncedDataRef.current || {};
+        const diffs = collectDiff(prev, data);
+        if(!diffs.length){
+          lastSyncedDataRef.current = data;
+          return;
+        }
+        lastSyncedDataRef.current = data;
+        submitOps(diffs);
+      }, [data, realtimeEnabled, collectDiff, submitOps]);
 
       function buildSavePayload(options = {}, snapshot = snapshotRef.current){
         const base = snapshot || {
@@ -1707,8 +2224,8 @@
           historyProfile,
           yearlyOptimize
         };
-        const noteValue = options.noteOverride !== undefined ? options.noteOverride : (base.note ?? note);
-        return {
+       const noteValue = options.noteOverride !== undefined ? options.noteOverride : (base.note ?? note);
+        const payload = {
           team,
           viewStart: base.viewStart || viewStart,
           viewEnd: base.viewEnd || viewEnd,
@@ -1744,6 +2261,10 @@
           historyProfile: base.historyProfile ?? historyProfile,
           yearlyOptimize: base.yearlyOptimize ?? yearlyOptimize
         };
+        if(realtimeEnabled){
+          delete payload.data;
+        }
+        return payload;
       }
 
       function safeParseSnapshot(serialized){
@@ -1885,6 +2406,8 @@
 
       async function triggerAutoSave(reason, options = {}){
         const { waitForResponse = false } = options;
+        if(historyViewing) return false;
+        if(realtimeEnabled && !isLiveReadyRef.current) return false;
         if(autoSaveSendingRef.current) return false;
         if(!pendingAutoSaveRef.current) return false;
         const snapshot = snapshotRef.current;
@@ -2048,7 +2571,7 @@
           setVersions(list);
           if(list.length){
             const latestId = list[0]?.id;
-            if(latestId && lastLoadedVersionRef.current[trimmedTeam] !== latestId){
+            if(latestId && (!realtimeEnabled || historyViewing) && lastLoadedVersionRef.current[trimmedTeam] !== latestId){
               await loadVersionById(latestId, { silent:true });
             }
           } else {
@@ -2063,12 +2586,57 @@
       async function loadVersionById(id, options={}){
         try{
           const res = await apiGet(`/version?id=${id}`);
-          applyServerState({ ...res, versionId: id });
+          applyServerState({ ...res, versionId: id, __history: true });
           lastLoadedVersionRef.current[team] = id;
         } catch(e){
           if(!options?.silent){
             globalErr(e.message);
           }
+        }
+      }
+      async function restoreVersionById(id){
+        if(!realtimeEnabled){
+          globalErr('当前未启用实时协作，无法创建新版本。');
+          return;
+        }
+        const trimmedTeam = (team || '').trim();
+        if(!trimmedTeam){
+          globalErr('请选择团队后再操作');
+          return;
+        }
+        if(!id) return;
+        if(versionRestoringId){
+          return;
+        }
+        if(!confirm('确定基于该历史版本创建一个新版本并写入当前排班？原历史记录将保留。')) return;
+        setVersionRestoringId(id);
+        try{
+          const payload = {
+            team: trimmedTeam,
+            versionId: id,
+            operator: formatOperatorLabel(user),
+          };
+          if(versionId != null){
+            payload.baseVersionId = versionId;
+          }
+          const res = await apiPost('/schedule/version/restore', payload);
+          showToast('已基于历史版本生成新版本', 'success');
+          setHistoryViewing(false);
+          await loadFromServer();
+          await loadVersions();
+          if(res && typeof res.liveVersion === 'number'){
+            liveSinceRef.current = res.liveVersion;
+            setLiveVersion(res.liveVersion);
+          }
+          const newVersion = (res && (res.versionId || res.version_id)) || null;
+          if(newVersion != null){
+            setVersionId(newVersion);
+            lastLoadedVersionRef.current[trimmedTeam] = newVersion;
+          }
+        } catch(e){
+          globalErr(e?.message || '恢复历史版本失败');
+        } finally {
+          setVersionRestoringId(null);
         }
       }
       async function deleteVersionById(id){
@@ -2352,6 +2920,7 @@
         const d = dateList[dIndex];
         const emp = employees[eIndex];
         if(!d || !emp) return;
+        removeConflict(d, emp);
         setData(prev=>{
           const next = { ...prev };
           const row = { ...(next[d]||{}) };
@@ -2359,7 +2928,7 @@
           next[d] = row;
           return next;
         });
-      }, [dateList, employees]);
+      }, [dateList, employees, removeConflict]);
       const onFocusCell = useCallback((dIndex, eIndex)=>{ activeCellRef.current = { dIndex, eIndex }; }, []);
       const dateCount = dateList.length;
       const empCount = employees.length;
@@ -2459,9 +3028,12 @@
         openPickerAt,
         setCellByIndex,
         rowRef,
-        measureCell
+        measureCell,
+        conflictMap,
+        onClearConflict
       }){
         const dataRow = rowData || EMPTY_ROW;
+        const conflictRow = conflictMap && typeof conflictMap === 'object' ? conflictMap : EMPTY_ROW;
         const stats = useMemo(()=>{
           let total = 0; let white = 0; let mid1 = 0; let mid2 = 0; let night = 0;
           for(const emp of employeesList){
@@ -2509,6 +3081,7 @@
               const value = dataRow[emp] || '';
               const bg = shiftColors[value] || undefined;
               const cellRef = offset === 0 && measureCell ? measureCell : null;
+              const conflictInfo = conflictRow[emp];
               return (
                 <td key={emp} className="py-1.5 px-3" ref={cellRef}>
                   <div className="cell-wrap">
@@ -2526,6 +3099,13 @@
                       onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
                       <span className="sr-only">打开班次选择器</span>
                     </button>
+                    {conflictInfo && (
+                      <button type="button" className="absolute top-1 right-1 rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-medium text-white shadow focus:outline-none focus:ring-2 focus:ring-amber-300"
+                        title={conflictInfo.message || '该单元格已被他人更新'}
+                        onClick={()=> onClearConflict && onClearConflict(day, emp)}>
+                        冲突
+                      </button>
+                    )}
                   </div>
                 </td>
               );
@@ -2659,6 +3239,12 @@
             <div className="text-sm text-gray-500">请先在「员工管理」中添加员工。</div>
           ) : (
             <>
+              {historyViewing && (
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+                  <span>当前正在预览历史备份（版本 ID {versionId ?? '—'}），排班表暂时只读。</span>
+                  <button type="button" className="inline-flex items-center rounded-full bg-amber-500 px-3 py-1 text-white shadow hover:bg-amber-400" onClick={loadFromServer}>返回实时视图</button>
+                </div>
+              )}
               <div
                 ref={gridContainerRef}
                 className="grid-wrap border rounded-xl shadow-inner"
@@ -2740,6 +3326,8 @@
                           setCellByIndex={setCellByIndex}
                           rowRef={rowRef}
                           measureCell={cellMeasure}
+                          conflictMap={conflictHints[d] || EMPTY_ROW}
+                          onClearConflict={removeConflict}
                         />
                       );
                     })}
@@ -4129,6 +4717,7 @@
                     const operator = operatorRaw || '管理员';
                     const isAuto = isAutoSaveLabel(operatorRaw);
                     const deleting = versionDeletingId === v.id;
+                    const restoring = versionRestoringId === v.id;
                     return (
                       <tr key={v.id} className="border-t hover:bg-gray-50">
                         <td className="py-1 px-3">
@@ -4143,8 +4732,18 @@
                         </td>
                         <td className="py-1 px-3 text-gray-600">{remark || '—'}</td>
                         <td className="py-1 px-3">
-                          <div className="flex items-center gap-3">
-                            <button type="button" className="text-indigo-600 hover:underline disabled:text-gray-400 disabled:no-underline" onClick={()=>loadVersionById(v.id)} disabled={versionsLoading || deleting}>载入</button>
+                          <div className="flex flex-wrap items-center gap-3">
+                            {realtimeEnabled && (
+                              <button
+                                type="button"
+                                className="flex items-center gap-1 text-emerald-600 hover:underline disabled:text-emerald-300 disabled:no-underline"
+                                onClick={()=> restoreVersionById(v.id)}
+                                disabled={deleting || restoring || versionsLoading || prog.running}
+                              >
+                                {restoring ? (<><Spinner className="w-3.5 h-3.5 text-emerald-500" /><span>创建中…</span></>) : '基于此版本创建新版本'}
+                              </button>
+                            )}
+                            <button type="button" className="text-indigo-600 hover:underline disabled:text-gray-400 disabled:no-underline" onClick={()=>loadVersionById(v.id)} disabled={versionsLoading || deleting}>预览</button>
                             <button type="button" className="flex items-center gap-1 text-rose-600 hover:underline disabled:text-rose-300 disabled:no-underline" onClick={()=>deleteVersionById(v.id)} disabled={deleting || versionsLoading}>
                               {deleting ? (<><Spinner className="w-3.5 h-3.5 text-rose-500" /><span>删除中</span></>) : '删除'}
                             </button>
