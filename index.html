@@ -84,6 +84,7 @@
 
     const API_BASE = '/api';
     const EMPTY_ROW = Object.freeze({});
+    const EMPTY_STATS = Object.freeze({ total: 0, white: 0, mid1: 0, mid2: 0, night: 0 });
     const WN = ['日','一','二','三','四','五','六'];
     const today = new Date();
     const SHIFT_TYPES = ['白','中1','中2','夜','休'];
@@ -130,6 +131,14 @@
       const mondayIdx = (d.getDay()+6)%7;
       d.setDate(d.getDate()-mondayIdx);
       return fmt(d);
+    }
+    function formatDateTimeString(value){
+      if(!value) return '—';
+      const str = String(value);
+      const candidate = str.includes('T') ? str : str.replace(' ', 'T');
+      const date = new Date(candidate);
+      if(Number.isNaN(date.getTime())) return str;
+      return date.toLocaleString();
     }
 
     function albumEntryKey(entry, fallbackIndex = 0){
@@ -393,6 +402,15 @@
         }
       };
     }
+    function normalizeBackupConfig(raw){
+      const base = { intervalMinutes: 10, limit: 50 };
+      if(!raw || typeof raw !== 'object') return { ...base };
+      const intervalRaw = raw.intervalMinutes ?? raw.interval_minutes ?? raw.interval ?? 10;
+      const limitRaw = raw.limit ?? raw.maxCount ?? raw.max_count ?? 50;
+      const interval = Number.isFinite(Number(intervalRaw)) ? Math.max(1, Math.round(Number(intervalRaw))) : 10;
+      const limit = Number.isFinite(Number(limitRaw)) ? Math.max(1, Math.round(Number(limitRaw))) : 50;
+      return { intervalMinutes: interval, limit };
+    }
     function defaultOrgConfig(){
       return {
         teams: [
@@ -407,7 +425,8 @@
             menus: defaultMenuPerms({ roles:{ visible:true } }),
             teamAccess:['*']
           }
-        ]
+        ],
+        backup: normalizeBackupConfig()
       };
     }
     function normalizeOrgConfig(raw){
@@ -459,7 +478,8 @@
         teamAccess:['*']
       };
       accounts.push(adminAccount);
-      return { teams, accounts };
+      const backup = normalizeBackupConfig(raw?.backup || defaults.backup);
+      return { teams, accounts, backup };
     }
     function createEmptyTeamState(rangeStart, rangeEnd){
       return {
@@ -494,7 +514,9 @@
         batchChecked: {},
         albumHistory: [],
         historyProfile: null,
-        yearlyOptimize: false
+        yearlyOptimize: false,
+        updatedAt: null,
+        lastBackupAt: null
       };
     }
     const ORG_STORAGE_KEY = 'scheduler_org_config_v1';
@@ -574,7 +596,7 @@
         { key:'album', icon:'magic', label:'专辑审核自动排班' },
         { key:'users', icon:'users', label:'员工管理' },
         { key:'stats', icon:'chart', label:'统计与对齐' },
-        { key:'history', icon:'history', label:'历史版本' },
+        { key:'history', icon:'history', label:'备份记录' },
         { key:'settings', icon:'cog', label:'设置 / 导出' },
         { key:'roles', icon:'lock', label:'角色设置' }
       ];
@@ -887,6 +909,8 @@
 
       const [team, setTeam] = useState(()=> (orgConfig.teams?.[0]?.id || 'default'));
       const [note, setNote] = useState('');
+      const [serverUpdatedAt, setServerUpdatedAt] = useState(null);
+      const [lastBackupAt, setLastBackupAt] = useState(null);
       const [planStart, setPlanStart] = useState(defaultStart);
       const [planEnd, setPlanEnd]     = useState(defaultEnd);
       const [viewStart, setViewStart] = useState(defaultStart);
@@ -906,7 +930,12 @@
         });
       }, [versions, showAutoSaves]);
       const [versionDeletingId, setVersionDeletingId] = useState(null);
+      const [logExportStart, setLogExportStart] = useState('');
+      const [logExportEnd, setLogExportEnd] = useState('');
+      const [logExporting, setLogExporting] = useState(false);
+      const [logExportError, setLogExportError] = useState('');
       const [toast, setToast] = useState(null);
+      useEffect(()=>{ lastSyncedSnapshotRef.current = null; }, [team]);
       const toastTimerRef = useRef(null);
       useEffect(()=>{
         return ()=>{
@@ -985,6 +1014,7 @@
       const initializedRef = useRef(false);
 
       const snapshotRef = useRef(null);
+      const lastSyncedSnapshotRef = useRef(null);
       const lastSavedSnapshotRef = useRef('');
       const pendingAutoSaveRef = useRef(false);
       const [autoSaveTicker, setAutoSaveTicker] = useState(0);
@@ -1119,6 +1149,7 @@
       useEffect(()=>{ tryRestoreRestForView(); }, [team, planStart, planEnd]);
 
       const teamsList = orgConfig.teams || [];
+      const backupConfig = useMemo(()=> normalizeBackupConfig(orgConfig.backup), [orgConfig.backup]);
       const accountConfig = useMemo(()=>{
         if(!user) return null;
         return orgConfig.accounts.find(acc=> acc.username === user.username) || null;
@@ -1182,7 +1213,6 @@
         })();
         return ()=>{ cancelled = true; };
       }, [user, accessibleTeams, team, defaultStart, defaultEnd]);
-
       const activeTeam = useMemo(()=> teamsList.find(t=> t.id === team) || teamsList[0] || { id: team, name: team, features:{ albumScheduler:true } }, [teamsList, team]);
       const teamFeatures = activeTeam?.features || { albumScheduler:true };
       const teamDisplayName = activeTeam?.name || team;
@@ -1237,7 +1267,7 @@
         album: '专辑审核',
         users: '员工管理',
         stats: '统计与对齐',
-        history: '历史版本',
+        history: '备份记录',
         settings: '设置 / 导出',
         roles: '角色设置'
       };
@@ -1408,6 +1438,13 @@
           return { ...acc, teamAccess: current };
         });
       };
+      const updateBackupSetting = (field, value)=>{
+        updateOrgConfig(prev=>{
+          const current = normalizeBackupConfig(prev.backup);
+          const next = { ...current, [field]: value };
+          return { ...prev, backup: next };
+        });
+      };
 
       const lastLoadedVersionRef = useRef({});
       const autoLoadedTeamRef = useRef({});
@@ -1421,6 +1458,8 @@
         if(user){
           setTeamStateMap({});
         }
+        setServerUpdatedAt(null);
+        setLastBackupAt(null);
       }, [user?.username]);
       const autoLoadKey = useMemo(()=>{
         const safeTeam = team || 'default';
@@ -1451,6 +1490,52 @@
         return false;
       }
 
+      function deepCloneSnapshot(snapshot){
+        if(!snapshot || typeof snapshot !== 'object') return null;
+        try {
+          return JSON.parse(JSON.stringify(snapshot));
+        } catch {
+          return null;
+        }
+      }
+
+      function computeSnapshotDiff(baseSnapshot, currentSnapshot){
+        if(!currentSnapshot || typeof currentSnapshot !== 'object') return null;
+        if(!baseSnapshot || typeof baseSnapshot !== 'object') return null;
+        const diff = { fields:{}, data:{} };
+        let changed = false;
+        const keys = ['viewStart','viewEnd','start','end','employees','note','adminDays','restPrefs','nightRules','nightWindows','nightOverride','rMin','rMax','pMin','pMax','mixMax','shiftColors','staffingAlerts','batchChecked','albumSelected','albumWhiteHour','albumMidHour','albumRangeStartMonth','albumRangeEndMonth','albumMaxDiff','albumAssignments','albumAutoNote','albumHistory','historyProfile','yearlyOptimize'];
+        keys.forEach(key=>{
+          const baseVal = baseSnapshot[key];
+          const curVal = currentSnapshot[key];
+          if(!jsonEquals(baseVal, curVal)){
+            diff.fields[key] = true;
+            changed = true;
+          }
+        });
+        const baseData = baseSnapshot && typeof baseSnapshot.data === 'object' ? baseSnapshot.data : {};
+        const currentData = currentSnapshot && typeof currentSnapshot.data === 'object' ? currentSnapshot.data : {};
+        const days = new Set([...Object.keys(baseData), ...Object.keys(currentData)]);
+        days.forEach(day=>{
+          const baseRow = baseData[day] && typeof baseData[day] === 'object' ? baseData[day] : {};
+          const curRow = currentData[day] && typeof currentData[day] === 'object' ? currentData[day] : {};
+          const emps = new Set([...Object.keys(baseRow), ...Object.keys(curRow)]);
+          const rowDiff = {};
+          emps.forEach(emp=>{
+            const baseVal = baseRow[emp] === undefined || baseRow[emp] === null ? '' : String(baseRow[emp]);
+            const curVal = curRow[emp] === undefined || curRow[emp] === null ? '' : String(curRow[emp]);
+            if(baseVal !== curVal){
+              rowDiff[emp] = curRow[emp] === undefined ? '' : curRow[emp];
+            }
+          });
+          if(Object.keys(rowDiff).length){
+            diff.data[day] = rowDiff;
+            changed = true;
+          }
+        });
+        return changed ? diff : null;
+      }
+
       function convertPayloadToTeamState(payload, fallback = {}){
         if(!payload || typeof payload !== 'object') return null;
         const get = (...keys)=>{
@@ -1471,6 +1556,8 @@
         const viewEndRaw = get('viewEnd','view_end');
         const resolvedViewStart = typeof viewStartRaw === 'string' && viewStartRaw ? viewStartRaw.slice(0,10) : resolvedStart;
         const resolvedViewEnd = typeof viewEndRaw === 'string' && viewEndRaw ? viewEndRaw.slice(0,10) : resolvedEnd;
+        const updatedAtRaw = get('updatedAt','updated_at');
+        const lastBackupRaw = get('lastBackupAt','last_backup_at');
         const employeesPayload = get('employees');
         const employees = Array.isArray(employeesPayload) ? employeesPayload.map(e=> typeof e === 'string' ? e : String(e)) : [];
         const dataPayload = get('data');
@@ -1543,7 +1630,9 @@
           albumAutoNote: typeof albumAutoNotePayload === 'string' ? albumAutoNotePayload : '',
           albumHistory: Array.isArray(albumHistoryPayload) ? albumHistoryPayload.map(item=> ({ ...item, assignments: item?.assignments || {} })) : [],
           historyProfile: historyProfilePayload || null,
-          yearlyOptimize: yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1'
+          yearlyOptimize: yearlyOptimizePayload === true || yearlyOptimizePayload === 1 || yearlyOptimizePayload === '1',
+          updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw ? updatedAtRaw : null,
+          lastBackupAt: typeof lastBackupRaw === 'string' && lastBackupRaw ? lastBackupRaw : null
         };
       }
 
@@ -1585,6 +1674,10 @@
         setAlbumHistory(Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []);
         setHistoryProfile(snapshot.historyProfile || null);
         setYearlyOptimize(snapshot.yearlyOptimize === true);
+        const payloadUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : (typeof payload?.updated_at === 'string' ? payload.updated_at : (snapshot.updatedAt || null));
+        const payloadBackupAt = typeof payload?.lastBackupAt === 'string' ? payload.lastBackupAt : (typeof payload?.last_backup_at === 'string' ? payload.last_backup_at : (snapshot.lastBackupAt || null));
+        setServerUpdatedAt(payloadUpdatedAt || null);
+        setLastBackupAt(payloadBackupAt || null);
         const snapshotClone = {
           ...snapshot,
           employees: Array.isArray(snapshot.employees) ? snapshot.employees.slice() : [],
@@ -1596,9 +1689,13 @@
           batchChecked: snapshot.batchChecked ? { ...snapshot.batchChecked } : {},
           albumSelected: snapshot.albumSelected ? { ...snapshot.albumSelected } : {},
           albumAssignments: snapshot.albumAssignments ? { ...snapshot.albumAssignments } : {},
-          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : []
+          albumHistory: Array.isArray(snapshot.albumHistory) ? snapshot.albumHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } })) : [],
+          updatedAt: payloadUpdatedAt || null,
+          lastBackupAt: payloadBackupAt || null
         };
         snapshotRef.current = snapshotClone;
+        const syncedClone = deepCloneSnapshot(snapshotClone);
+        lastSyncedSnapshotRef.current = syncedClone || snapshotClone;
         lastSavedSnapshotRef.current = JSON.stringify(snapshotClone);
         pendingAutoSaveRef.current = false;
       }
@@ -1639,7 +1736,7 @@
           yearlyOptimize
         };
         const noteValue = options.noteOverride !== undefined ? options.noteOverride : (base.note ?? note);
-        return {
+        const payload = {
           team,
           viewStart: base.viewStart || viewStart,
           viewEnd: base.viewEnd || viewEnd,
@@ -1675,6 +1772,11 @@
           historyProfile: base.historyProfile ?? historyProfile,
           yearlyOptimize: base.yearlyOptimize ?? yearlyOptimize
         };
+        const diff = computeSnapshotDiff(lastSyncedSnapshotRef.current, base);
+        if(diff){
+          payload.changes = diff;
+        }
+        return payload;
       }
 
       function safeParseSnapshot(serialized){
@@ -1800,7 +1902,11 @@
         }
         if(applied > 0){
           pendingAutoSaveRef.current = true;
-          lastSavedSnapshotRef.current = '';
+          try {
+            lastSavedSnapshotRef.current = JSON.stringify(snapshotRef.current);
+          } catch {
+            lastSavedSnapshotRef.current = '';
+          }
           setTimeout(()=> setAutoSaveTicker(tick=> tick + 1), 0);
         } else {
           pendingAutoSaveRef.current = false;
@@ -1831,6 +1937,11 @@
         }catch(e){
           return false;
         }
+        if(!payload?.changes && lastSyncedSnapshotRef.current){
+          pendingAutoSaveRef.current = false;
+          autoSaveSendingRef.current = false;
+          return false;
+        }
         let serializedSnapshot = '';
         try{ serializedSnapshot = JSON.stringify(snapshot); }catch(e){ serializedSnapshot = ''; }
         autoSaveSendingRef.current = true;
@@ -1845,8 +1956,20 @@
                 lastLoadedVersionRef.current[team] = returnedVersion;
               }
             }
+            if(res){
+              if(res.updated_at || res.updatedAt){
+                setServerUpdatedAt(res.updated_at || res.updatedAt);
+              }
+              if(res.last_backup_at || res.lastBackupAt){
+                setLastBackupAt(res.last_backup_at || res.lastBackupAt);
+              }
+            }
             if(serializedSnapshot){
               lastSavedSnapshotRef.current = serializedSnapshot;
+            }
+            const syncedState = deepCloneSnapshot(snapshotRef.current);
+            if(syncedState){
+              lastSyncedSnapshotRef.current = syncedState;
             }
             pendingAutoSaveRef.current = false;
             autoSaveSendingRef.current = false;
@@ -1893,6 +2016,10 @@
         } else {
           lastSavedSnapshotRef.current = body;
         }
+        try{
+          const nowIso = new Date().toISOString();
+          setServerUpdatedAt(nowIso);
+        }catch{}
         pendingAutoSaveRef.current = false;
         autoSaveSendingRef.current = false;
         return true;
@@ -1945,36 +2072,10 @@
           globalErr(e.message);
         }
       }
-      async function saveToServer(){
-        const snapshotBeforeSave = snapshotRef.current;
-        try{
-          const payload = buildSavePayload();
-          const res = await apiPost('/schedule/save', payload);
-          const returnedVersion = res && (res.version_id || res.versionId);
-          const nextVersion = returnedVersion || versionId || null;
-          applyServerState({ ...payload, versionId: nextVersion });
-          if(nextVersion){
-            lastLoadedVersionRef.current[team] = nextVersion;
-            if(team){
-              initialTeamSyncRef.current[team] = true;
-            }
-          }
-          showToast('已保存新版本', 'success');
-          if(tab === 'history'){
-            loadVersions();
-          }
-        } catch(e){
-          if(e?.payload && e.payload.code===409){
-            await resolveSaveConflict('manual-save', snapshotBeforeSave, { manual:true });
-            return;
-          }
-          globalErr(e.message);
-        }
-      }
       async function loadVersions(){
         const trimmedTeam = (team || '').trim();
         if(!trimmedTeam){
-          globalErr('请选择团队后再刷新历史版本');
+          globalErr('请选择团队后再刷新备份记录');
           return;
         }
         setVersionsLoading(true);
@@ -2018,7 +2119,7 @@
       }
       async function deleteVersionById(id){
         if(!id) return;
-        if(!confirm('确定删除该历史版本吗？删除后无法恢复。')) return;
+        if(!confirm('确定删除该备份记录吗？删除后无法恢复。')) return;
         const trimmedTeam = (team || '').trim();
         if(!trimmedTeam){
           globalErr('请选择团队后再操作');
@@ -2031,7 +2132,7 @@
           if(lastLoadedVersionRef.current[trimmedTeam] === id){
             delete lastLoadedVersionRef.current[trimmedTeam];
           }
-          showToast('已删除历史版本', 'success');
+          showToast('已删除备份记录', 'success');
           await loadVersions();
         } catch(e){
           globalErr(e.message);
@@ -2113,6 +2214,53 @@
         }
       }
       function downloadTemplate(){ window.location.href = `${API_BASE}/template/xlsx`; }
+      async function exportTeamLogs(){
+        const trimmedTeam = (team || '').trim();
+        if(!trimmedTeam){
+          globalErr('请选择团队后再导出日志');
+          return;
+        }
+        if(logExportStart && logExportEnd && logExportStart > logExportEnd){
+          setLogExportError('开始日期不能晚于结束日期');
+          return;
+        }
+        setLogExportError('');
+        setLogExporting(true);
+        try{
+          const params = new URLSearchParams();
+          params.set('team', trimmedTeam);
+          if(logExportStart) params.set('start', logExportStart);
+          if(logExportEnd) params.set('end', logExportEnd);
+          const res = await fetch(`${API_BASE}/team/logs/export?${params.toString()}`, { credentials:'include' });
+          if(!res.ok){
+            let msg = '导出失败';
+            try{ const err = await res.json(); if(err?.message) msg = err.message; }catch{}
+            throw new Error(msg);
+          }
+          const blob = await res.blob();
+          let filename = `操作日志_${trimmedTeam}.csv`;
+          const disposition = res.headers.get('Content-Disposition') || '';
+          const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+          if(match){
+            const encoded = match[1] || match[2];
+            if(encoded){
+              try{ filename = decodeURIComponent(encoded.replace(/"/g,'')); }catch{ filename = encoded.replace(/"/g,''); }
+            }
+          }
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+        }catch(err){
+          setLogExportError(err?.message || '导出失败');
+        }finally{
+          setLogExporting(false);
+        }
+      }
       function openImportPicker(){ if(editingLocked) return; if(importInputRef.current){ importInputRef.current.click(); } }
       async function importScheduleFile(file){
         if(!file) return;
@@ -2201,97 +2349,13 @@
         return allDateKeys.filter(day=> (!s || day >= s) && (!e || day <= e));
       }, [planStart, planEnd, allDateKeys]);
       const gridContainerRef = useRef(null);
-      const gridScrollRafRef = useRef(null);
-      const gridRowHeightRef = useRef(56);
-      const gridColWidthRef = useRef(120);
-      const [gridScrollTop, setGridScrollTop] = useState(0);
-      const [gridScrollLeft, setGridScrollLeft] = useState(0);
-      const [gridViewportHeight, setGridViewportHeight] = useState(0);
-      const [gridViewportWidth, setGridViewportWidth] = useState(0);
-      const [gridRowHeight, setGridRowHeight] = useState(56);
-      const [gridColWidth, setGridColWidth] = useState(120);
-      useEffect(()=>{ gridRowHeightRef.current = gridRowHeight || 56; }, [gridRowHeight]);
-      useEffect(()=>{ gridColWidthRef.current = gridColWidth || 120; }, [gridColWidth]);
-      const handleGridScroll = useCallback((event)=>{
-        const node = event.currentTarget;
-        const top = node ? node.scrollTop : 0;
-        const left = node ? node.scrollLeft : 0;
-        if(gridScrollRafRef.current){
-          cancelAnimationFrame(gridScrollRafRef.current);
-        }
-        gridScrollRafRef.current = requestAnimationFrame(()=>{
-          setGridScrollTop(top);
-          setGridScrollLeft(left);
-        });
-      }, []);
-      useEffect(()=>()=>{ if(gridScrollRafRef.current) cancelAnimationFrame(gridScrollRafRef.current); }, []);
-      useLayoutEffect(()=>{
-        const node = gridContainerRef.current;
-        if(!node) return;
-        const updateSize = ()=>{
-          const nextH = node.clientHeight || 0;
-          const nextW = node.clientWidth || 0;
-          setGridViewportHeight(prev=> Math.abs(prev - nextH) > 1 ? nextH : prev);
-          setGridViewportWidth(prev=> Math.abs(prev - nextW) > 1 ? nextW : prev);
-        };
-        updateSize();
-        if(typeof ResizeObserver !== 'undefined'){
-          const ro = new ResizeObserver(()=> updateSize());
-          ro.observe(node);
-          return ()=> ro.disconnect();
-        }
-        const timer = setInterval(updateSize, 500);
-        return ()=> clearInterval(timer);
-      }, [employees.length, dateList.length]);
       useEffect(()=>{
-        setGridScrollTop(0);
-        setGridScrollLeft(0);
         const node = gridContainerRef.current;
         if(node){
           node.scrollTop = 0;
           node.scrollLeft = 0;
         }
       }, [team, viewStart, viewEnd, planStart, planEnd, employees.length]);
-      const measureRow = useCallback((node)=>{
-        if(node){
-          const rect = node.getBoundingClientRect();
-          const nextHeight = rect && rect.height ? rect.height : 0;
-          if(nextHeight && Math.abs(nextHeight - gridRowHeightRef.current) > 1){
-            gridRowHeightRef.current = nextHeight;
-            setGridRowHeight(nextHeight);
-          }
-        }
-      }, []);
-      const measureCell = useCallback((node)=>{
-        if(node){
-          const rect = node.getBoundingClientRect();
-          const nextWidth = rect && rect.width ? rect.width : 0;
-          if(nextWidth && Math.abs(nextWidth - gridColWidthRef.current) > 1){
-            gridColWidthRef.current = nextWidth;
-            setGridColWidth(nextWidth);
-          }
-        }
-      }, []);
-      const safeRowHeight = Math.max(1, gridRowHeight || 56);
-      const estimatedRowsInView = gridViewportHeight > 0 ? Math.ceil(gridViewportHeight / safeRowHeight) : 14;
-      const overscanRows = Math.max(10, Math.ceil(estimatedRowsInView / 2));
-      const totalHeight = safeRowHeight * dateList.length;
-      const startIndex = Math.max(0, Math.floor(gridScrollTop / safeRowHeight) - overscanRows);
-      const endIndex = Math.min(dateList.length, Math.ceil((gridScrollTop + gridViewportHeight) / safeRowHeight) + overscanRows);
-      const visibleDates = dateList.slice(startIndex, endIndex);
-      const beforeHeight = startIndex * safeRowHeight;
-      const afterHeight = Math.max(0, totalHeight - endIndex * safeRowHeight);
-      const safeColWidth = Math.max(40, gridColWidth || 120);
-      const totalColumnWidth = safeColWidth * Math.max(employees.length, 0);
-      const estimatedColsInView = gridViewportWidth > 0 ? Math.ceil(gridViewportWidth / safeColWidth) : 8;
-      const overscanCols = Math.max(10, Math.ceil(estimatedColsInView / 2));
-      const startEmpIndex = Math.max(0, Math.floor(gridScrollLeft / safeColWidth) - overscanCols);
-      const endEmpIndex = Math.min(employees.length, Math.ceil((gridScrollLeft + gridViewportWidth) / safeColWidth) + overscanCols);
-      const visibleEmployees = employees.slice(startEmpIndex, endEmpIndex);
-      const beforeColumnWidth = startEmpIndex * safeColWidth;
-      const afterColumnWidth = Math.max(0, totalColumnWidth - endEmpIndex * safeColWidth);
-      const dynamicColumnCount = visibleEmployees.length + (beforeColumnWidth > 0 ? 1 : 0) + (afterColumnWidth > 0 ? 1 : 0);
-      const columnSpan = Math.max(1, 3 + Math.max(dynamicColumnCount, 1));
       const activeCellRef = useRef(null);
       const setCellByIndex = useCallback((dIndex, eIndex, value)=>{
         const d = dateList[dIndex];
@@ -2306,32 +2370,22 @@
         });
       }, [dateList, employees]);
       const onFocusCell = useCallback((dIndex, eIndex)=>{ activeCellRef.current = { dIndex, eIndex }; }, []);
-      const dateCount = dateList.length;
-      const empCount = employees.length;
       const moveActive = useCallback((dx, dy)=>{
         const cur = activeCellRef.current || { dIndex:0, eIndex:0 };
-        const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateCount-1));
-        const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, empCount-1));
+        const ni = Math.max(0, Math.min((cur.dIndex||0) + dy, dateList.length - 1));
+        const nj = Math.max(0, Math.min((cur.eIndex||0) + dx, employees.length - 1));
         activeCellRef.current = { dIndex: ni, eIndex: nj };
-        const container = gridContainerRef.current;
-        if(container){
-          const rowHeight = gridRowHeightRef.current || safeRowHeight;
-          const targetTop = ni * rowHeight;
-          const targetBottom = targetTop + rowHeight;
-          const viewTop = container.scrollTop;
-          const viewBottom = viewTop + container.clientHeight;
-          if(targetTop < viewTop){
-            container.scrollTop = targetTop;
-          } else if(targetBottom > viewBottom){
-            container.scrollTop = targetBottom - container.clientHeight;
-          }
-        }
         const id = `cell-${ni}-${nj}`;
         requestAnimationFrame(()=>{
           const el = document.getElementById(id);
-          if(el) el.focus();
+          if(el){
+            el.focus();
+            if(typeof el.scrollIntoView === 'function'){
+              try{ el.scrollIntoView({ block:'nearest', inline:'nearest' }); }catch{}
+            }
+          }
         });
-      }, [dateCount, empCount, safeRowHeight]);
+      }, [dateList, employees]);
       const openPickerAt = useCallback((di, ei, anchorEl)=>{
         if(editingLocked) return;
         const el = anchorEl || document.getElementById(`cell-${di}-${ei}`);
@@ -2386,16 +2440,66 @@
         }
       }, [moveActive, openPickerAt]);
 
+      const sameEmployees = (prevList, nextList)=>{
+        if(prevList === nextList) return true;
+        if(!Array.isArray(prevList) || !Array.isArray(nextList)) return false;
+        if(prevList.length !== nextList.length) return false;
+        for(let i=0; i<nextList.length; i++){
+          if(prevList[i] !== nextList[i]) return false;
+        }
+        return true;
+      };
+
+      const sameRowValues = (prevRow, nextRow, employees)=>{
+        if(prevRow === nextRow) return true;
+        const prevMap = prevRow || EMPTY_ROW;
+        const nextMap = nextRow || EMPTY_ROW;
+        for(let i=0; i<employees.length; i++){
+          const emp = employees[i];
+          const prevVal = prevMap?.[emp] ?? '';
+          const nextVal = nextMap?.[emp] ?? '';
+          if(String(prevVal) !== String(nextVal)) return false;
+        }
+        return true;
+      };
+
+      const areScheduleRowPropsEqual = (prev, next)=>{
+        if(prev.day !== next.day) return false;
+        if(prev.issue !== next.issue) return false;
+        if(prev.editingLocked !== next.editingLocked) return false;
+        if(prev.shiftColors !== next.shiftColors) return false;
+        if(prev.onFocusCell !== next.onFocusCell) return false;
+        if(prev.onKeyDownCell !== next.onKeyDownCell) return false;
+        if(prev.openPickerAt !== next.openPickerAt) return false;
+        if(prev.setCellByIndex !== next.setCellByIndex) return false;
+        if(!sameEmployees(prev.employeesList, next.employeesList)) return false;
+        if(!sameRowValues(prev.rowData, next.rowData, next.employeesList || [])) return false;
+        const prevStats = prev.stats || EMPTY_STATS;
+        const nextStats = next.stats || EMPTY_STATS;
+        if(prevStats !== nextStats){
+          if(prevStats.total !== nextStats.total) return false;
+          if(prevStats.white !== nextStats.white) return false;
+          if(prevStats.mid1 !== nextStats.mid1) return false;
+          if(prevStats.mid2 !== nextStats.mid2) return false;
+          if(prevStats.night !== nextStats.night) return false;
+        }
+        const prevAlerts = prev.staffingAlerts || {};
+        const nextAlerts = next.staffingAlerts || {};
+        if(prevAlerts !== nextAlerts){
+          if((prevAlerts.total ?? null) !== (nextAlerts.total ?? null)) return false;
+          if((prevAlerts.white ?? null) !== (nextAlerts.white ?? null)) return false;
+          if((prevAlerts.mid1 ?? null) !== (nextAlerts.mid1 ?? null)) return false;
+        }
+        return true;
+      };
+
       const ScheduleRow = React.memo(function ScheduleRow({
         day,
         di,
         employeesList,
-        visibleEmployees,
-        startEmpIndex,
-        beforeColumnWidth,
-        afterColumnWidth,
         rowData,
         issue,
+        stats,
         staffingAlerts,
         editingLocked,
         shiftColors,
@@ -2403,59 +2507,39 @@
         onKeyDownCell,
         openPickerAt,
         setCellByIndex,
-        rowRef,
-        measureCell
       }){
         const dataRow = rowData || EMPTY_ROW;
-        const stats = useMemo(()=>{
-          let total = 0; let white = 0; let mid1 = 0; let mid2 = 0; let night = 0;
-          for(const emp of employeesList){
-            const v = dataRow[emp];
-            if(!v || v==='休') continue;
-            total++;
-            if(v==='白') white++;
-            else if(v==='中1') mid1++;
-            else if(v==='中2') mid2++;
-            else if(v==='夜') night++;
-          }
-          return { total, white, mid1, mid2, night };
-        }, [dataRow, employeesList]);
+        const statsSafe = stats || EMPTY_STATS;
+        const staffingRule = staffingAlerts || {};
         const w = dow(day);
         const weekend = w===0 || w===6;
         const weekLabel = WN[w];
         return (
-          <tr ref={rowRef || null} data-row-index={di} className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
+          <tr className={`border-t hover:bg-indigo-50/30 ${weekend ? 'bg-gray-50' : ''}`}>
             <td className="py-1.5 px-3 font-medium text-gray-800 left-sticky" style={{minWidth:'8.5rem'}}>
               <div className="flex items-center gap-2"><span>{day}</span></div>
               <div className="text-xs text-gray-500 flex flex-wrap items-center gap-1">
-                <span style={styleForStaffing(stats.total, staffingAlerts.total)}>在岗 {stats.total}</span>
+                <span style={styleForStaffing(statsSafe.total, staffingRule.total)}>在岗 {statsSafe.total}</span>
                 <span>（</span>
-                <span style={styleForStaffing(stats.white, staffingAlerts.white)}>白 {stats.white}</span>
+                <span style={styleForStaffing(statsSafe.white, staffingRule.white)}>白 {statsSafe.white}</span>
                 <span>/</span>
-                <span style={styleForStaffing(stats.mid1, staffingAlerts.mid1)}>中1 {stats.mid1}</span>
+                <span style={styleForStaffing(statsSafe.mid1, staffingRule.mid1)}>中1 {statsSafe.mid1}</span>
                 <span>/</span>
-                <span>中2 {stats.mid2}</span>
+                <span>中2 {statsSafe.mid2}</span>
                 <span>/</span>
-                <span>夜 {stats.night}</span>
+                <span>夜 {statsSafe.night}</span>
                 <span>）</span>
               </div>
             </td>
             <td className="py-1.5 px-3 text-gray-500 left-sticky-2" style={{minWidth:'6.5rem'}}>周{weekLabel}</td>
             <td className="py-1.5 px-3 left-sticky-3" style={{minWidth:'9rem'}}>
-              {issue? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
+              {issue ? <span className={`badge ${issue==='缺夜&中2'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{issue}</span> : <span className="text-gray-400">—</span>}
             </td>
-            {beforeColumnWidth > 0 && (
-              <td className="py-0" style={{ padding:0, border:0 }}>
-                <div style={{ width: beforeColumnWidth }}></div>
-              </td>
-            )}
-            {visibleEmployees.map((emp, offset)=>{
-              const ei = startEmpIndex + offset;
+            {employeesList.map((emp, ei)=>{
               const value = dataRow[emp] || '';
               const bg = shiftColors[value] || undefined;
-              const cellRef = offset === 0 && measureCell ? measureCell : null;
               return (
-                <td key={emp} className="py-1.5 px-3" ref={cellRef}>
+                <td key={emp} className="py-1.5 px-3">
                   <div className="cell-wrap">
                     <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
                       style={{ backgroundColor: bg }} value={value}
@@ -2475,14 +2559,9 @@
                 </td>
               );
             })}
-            {afterColumnWidth > 0 && (
-              <td className="py-0" style={{ padding:0, border:0 }}>
-                <div style={{ width: afterColumnWidth }}></div>
-              </td>
-            )}
           </tr>
         );
-      });
+      }, areScheduleRowPropsEqual);
 
       function clearRange(mode='empty'){
         setData(prev=>{ const next={...prev}; for(const d of dateList){ const r={...(next[d]||{})}; for(const e of employees){ r[e] = (mode==='rest')? '休' : ''; } next[d]=r; } return next; });
@@ -2598,6 +2677,40 @@
         return result;
       }, [viewYear, employees, data]);
 
+      const dailyStats = useMemo(()=>{
+        if(!dateList.length || employees.length===0){
+          const fallback = {};
+          dateList.forEach(day=>{ fallback[day] = EMPTY_STATS; });
+          return fallback;
+        }
+        const result = {};
+        for(const day of dateList){
+          const row = data?.[day] || EMPTY_ROW;
+          let total = 0;
+          let white = 0;
+          let mid1 = 0;
+          let mid2 = 0;
+          let night = 0;
+          for(const emp of employees){
+            const raw = row?.[emp];
+            if(raw === undefined || raw === null) continue;
+            const value = String(raw).trim();
+            if(value === '') continue;
+            total += 1;
+            if(value === '白'){ white += 1; }
+            else if(value === '中1'){ mid1 += 1; }
+            else if(value === '中2'){ mid2 += 1; }
+            else if(value === '夜'){ night += 1; }
+          }
+          if(total === 0 && white === 0 && mid1 === 0 && mid2 === 0 && night === 0){
+            result[day] = EMPTY_STATS;
+          } else {
+            result[day] = { total, white, mid1, mid2, night };
+          }
+        }
+        return result;
+      }, [dateList, employees, data]);
+
       const ViewGrid = (
         <Section title="排班表格" right={<span className="text-sm text-gray-500">提示：点击单元格→直接输入或从 Excel 粘贴；支持 IME 连续输入 {editingLocked && <span className='inline-flex items-center gap-1 text-rose-600 ml-2'><Icon name='lock'/>执行中：只读</span>}</span>}>
           {employees.length===0 ? (
@@ -2607,7 +2720,6 @@
               <div
                 ref={gridContainerRef}
                 className="grid-wrap border rounded-xl shadow-inner"
-                onScroll={handleGridScroll}
                 onPaste={(e)=>{ if(editingLocked) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}
               >
                 <table className="min-w-max text-sm w-full">
@@ -2616,12 +2728,7 @@
                       <th className="sticky py-2 px-3 text-left left-sticky" style={{minWidth:'8.5rem'}}>日期</th>
                       <th className="sticky py-2 px-3 text-left left-sticky-2" style={{minWidth:'6.5rem'}}>星期</th>
                       <th className="sticky py-2 px-3 text-left left-sticky-3" style={{minWidth:'9rem'}}>问题</th>
-                      {beforeColumnWidth > 0 && (
-                        <th className="py-0" style={{ padding:0, border:0 }}>
-                          <div style={{ width: beforeColumnWidth }}></div>
-                        </th>
-                      )}
-                      {visibleEmployees.map(e=> {
+                      {employees.map(e=> {
                         const diff = (gridEmpCounts[e]?.总||0) - Number(adminDays||0);
                         const diffCls = diff===0? 'bg-gray-100 text-gray-700' : (diff>0? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700');
                         const tooltip = empYearStats[e];
@@ -2647,34 +2754,18 @@
                           </th>
                         );
                       })}
-                      {afterColumnWidth > 0 && (
-                        <th className="py-0" style={{ padding:0, border:0 }}>
-                          <div style={{ width: afterColumnWidth }}></div>
-                        </th>
-                      )}
                     </tr>
                   </thead>
                   <tbody>
-                    {beforeHeight > 0 && (
-                      <tr key="virtual-top" aria-hidden="true">
-                        <td colSpan={columnSpan} style={{ height: beforeHeight, padding:0, border:0 }}></td>
-                      </tr>
-                    )}
-                    {visibleDates.map((d, idx)=>{
-                      const di = startIndex + idx;
-                      const rowRef = idx === 0 ? measureRow : null;
-                      const cellMeasure = idx === 0 ? measureCell : null;
+                    {dateList.map((d, di)=>{
                       return (
                         <ScheduleRow
                           key={d}
                           day={d}
                           di={di}
                           employeesList={employees}
-                          visibleEmployees={visibleEmployees}
-                          startEmpIndex={startEmpIndex}
-                          beforeColumnWidth={beforeColumnWidth}
-                          afterColumnWidth={afterColumnWidth}
                           rowData={data[d] || EMPTY_ROW}
+                          stats={dailyStats[d] || EMPTY_STATS}
                           issue={nightIssues[d] || ''}
                           staffingAlerts={staffingAlerts}
                           editingLocked={editingLocked}
@@ -2683,16 +2774,9 @@
                           onKeyDownCell={onKeyDownCell}
                           openPickerAt={openPickerAt}
                           setCellByIndex={setCellByIndex}
-                          rowRef={rowRef}
-                          measureCell={cellMeasure}
                         />
                       );
                     })}
-                    {afterHeight > 0 && (
-                      <tr key="virtual-bottom" aria-hidden="true">
-                        <td colSpan={columnSpan} style={{ height: afterHeight, padding:0, border:0 }}></td>
-                      </tr>
-                    )}
                   </tbody>
                 </table>
                 <datalist id="shift-options">
@@ -3418,7 +3502,7 @@
                 </tbody>
               </table>
             </div>
-            <div className="mt-3"><PillBtn color="emerald" onClick={saveToServer} disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存人员与偏好到服务器</PillBtn></div>
+            <div className="mt-3 text-xs text-gray-500">人员与偏好会随编辑自动保存，并参与团队备份。</div>
           </div>
         </Section>
       );
@@ -4028,33 +4112,34 @@
         );
       })();
 
+
       const ViewHistory = (
-        <Section title={`历史版本（${teamDisplayName}）`} right={<div className="flex items-center gap-3">
+        <Section title={`备份记录（${teamDisplayName}）`} right={<div className="flex items-center gap-3">
           <label className="inline-flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" className="rounded" checked={showAutoSaves} onChange={e=> setShowAutoSaves(e.target.checked)} />显示自动保存</label>
           <button onClick={loadVersions} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(editingLocked || versionsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={editingLocked || versionsLoading}>
-            {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新列表'}
+            {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新备份'}
           </button>
         </div>}>
           {versionsLoading && filteredVersions.length>0 && (
             <div className="flex items-center gap-2 text-xs text-gray-500 mb-3">
               <Spinner className="w-4 h-4 text-indigo-500" />
-              <span>正在刷新历史版本，请稍候…</span>
+              <span>正在刷新备份记录，请稍候…</span>
             </div>
           )}
           {versionsLoading && filteredVersions.length===0 ? (
-            <div className="text-sm text-gray-500">正在加载历史版本…</div>
+            <div className="text-sm text-gray-500">正在加载备份记录…</div>
           ) : filteredVersions.length===0 ? (
             versions.length>0 && !showAutoSaves && versions.some(v=> isAutoSaveLabel((v?.created_by_name || v?.created_by || '').trim())) ? (
               <p className="text-sm text-gray-500">当前筛选仅隐藏了自动保存记录，如需查看请勾选“显示自动保存”。</p>
             ) : (
-              <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无历史版本，请在“设置 / 导出”页保存新版本或稍后刷新。</p>
+              <p className="text-sm text-gray-500">当前团队「{teamDisplayName}」暂无备份记录，稍后刷新即可。</p>
             )
           ) : (
             <div className="overflow-auto rounded-2xl border" style={{ maxHeight: 'min(70vh, calc(100vh - 240px))' }}>
               <table className="text-sm w-full min-w-[780px]">
                 <thead className="bg-gray-50 text-gray-500">
                   <tr>
-                    <th className="text-left py-2 px-3">版本名</th>
+                    <th className="text-left py-2 px-3">备份备注</th>
                     <th className="text-left py-2 px-3">团队</th>
                     <th className="text-left py-2 px-3">版本ID</th>
                     <th className="text-left py-2 px-3">保存时间</th>
@@ -4080,7 +4165,7 @@
                         </td>
                         <td className="py-1 px-3 text-gray-600">{teamName}</td>
                         <td className="py-1 px-3 text-gray-600">{v.id}</td>
-                        <td className="py-1 px-3 text-gray-600">{createdAt}</td>
+                        <td className="py-1 px-3 text-gray-600">{formatDateTimeString(createdAt)}</td>
                         <td className="py-1 px-3 text-gray-600">
                           <span>{operator}</span>
                           {isAuto && <span className="ml-2 inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-500">自动保存</span>}
@@ -4111,21 +4196,53 @@
         <Section title="设置 / 导出">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm text-gray-600 mb-1">保存备注</label>
+              <label className="block text-sm text-gray-600 mb-1">排班备注（自动保存）</label>
               <input className="w-full border rounded px-3 py-2" value={note}
                 onCompositionStart={e=>{ e.target.isComposing = true; }}
                 onCompositionEnd={e=>{ e.target.isComposing = false; setNote(e.target.value); }}
-                onChange={allowIme(e=>setNote(e.target.value))} placeholder="例如：10月第一版"/>
+                onChange={allowIme(e=>setNote(e.target.value))} placeholder="例如：10月排班说明（将自动同步）"/>
             </div>
-            <div className="flex flex-wrap items-end gap-2">
-              <PillBtn onClick={saveToServer} color="emerald" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存新版本</PillBtn>
-              <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>服务器导出 Excel/CSV</PillBtn>
-              <PillBtn onClick={downloadTemplate} color="gray">下载导入模板</PillBtn>
-              <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?'执行中：只读':(importing?'导入中…':'')}>
-                {importing ? (<><Spinner className="w-4 h-4 text-white" /> 导入中…</>) : '导入 Excel' }
-              </PillBtn>
-              <input type="file" ref={importInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={onImportInputChange} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="block text-sm text-gray-600">备份间隔（分钟）
+                <input type="number" min={1} className="mt-1 w-full border rounded px-3 py-2" value={backupConfig.intervalMinutes}
+                  onChange={e=> updateBackupSetting('intervalMinutes', Math.max(1, Number(e.target.value)||1))} />
+              </label>
+              <label className="block text-sm text-gray-600">备份保留数量
+                <input type="number" min={1} className="mt-1 w-full border rounded px-3 py-2" value={backupConfig.limit}
+                  onChange={e=> updateBackupSetting('limit', Math.max(1, Number(e.target.value)||1))} />
+              </label>
             </div>
+          </div>
+          <div className="mt-2 text-xs text-gray-500">所有改动会立即写入服务器，并按上述设置自动备份。<span className="ml-2">最近保存：{formatDateTimeString(serverUpdatedAt)}</span><span className="ml-2">最近备份：{formatDateTimeString(lastBackupAt)}</span></div>
+          <div className="mt-6 border-t border-dashed pt-4">
+            <h3 className="text-sm font-medium text-gray-700 mb-3">导出操作日志</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-sm items-end">
+              <label className="flex flex-col">
+                <span className="text-gray-600">开始日期</span>
+                <input type="date" value={logExportStart} onChange={e=> setLogExportStart(e.target.value)} className="mt-1 border rounded px-3 py-2" />
+              </label>
+              <label className="flex flex-col">
+                <span className="text-gray-600">结束日期</span>
+                <input type="date" value={logExportEnd} onChange={e=> setLogExportEnd(e.target.value)} className="mt-1 border rounded px-3 py-2" />
+              </label>
+              <div className="flex items-center">
+                <PillBtn color="gray" onClick={exportTeamLogs} disabled={logExporting}>
+                  {logExporting ? (
+                    <span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>导出中…</span></span>
+                  ) : '导出 CSV'}
+                </PillBtn>
+              </div>
+              {logExportError ? <div className="text-xs text-rose-500">{logExportError}</div> : <div className="text-xs text-gray-400">若不选择时间范围，将导出全部日志</div>}
+            </div>
+            <div className="mt-2 text-xs text-gray-500">日志仅记录实际的排班改动操作，便于追溯多人协作历史。</div>
+          </div>
+          <div className="mt-4 flex flex-wrap items-end gap-2">
+            <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>服务器导出 Excel/CSV</PillBtn>
+            <PillBtn onClick={downloadTemplate} color="gray">下载导入模板</PillBtn>
+            <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?'执行中：只读':(importing?'导入中…':'')}>
+              {importing ? (<><Spinner className="w-4 h-4 text-white" /> 导入中…</>) : '导入 Excel' }
+            </PillBtn>
+            <input type="file" ref={importInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={onImportInputChange} />
           </div>
           <div className="mt-2 text-xs text-gray-500">导入支持 XLSX / XLS / CSV 格式，将覆盖当前排班并自动更新周期。</div>
           <div className="mt-6">
@@ -4374,7 +4491,7 @@
           {Topbar}
           <div className="layout-shell py-6">
             <SideDock tab={tab} setTab={setTab} menuPerms={menuPerms}/>
-            <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.3</footer></main>
+            <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.5</footer></main>
           </div>
 
           {toast && (

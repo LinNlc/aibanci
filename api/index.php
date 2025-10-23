@@ -64,14 +64,40 @@ function db(): PDO {
   } catch (Throwable $e) {
     // 已有 payload 列时忽略
   }
-$pdo->exec("CREATE INDEX IF NOT EXISTS idx_sv_team_range ON schedule_versions(team, view_start, view_end, id);");
+  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_sv_team_range ON schedule_versions(team, view_start, view_end, id);");
 
-$pdo->exec("
-  CREATE TABLE IF NOT EXISTS org_config (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    payload TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-  );
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS team_states (
+      team TEXT PRIMARY KEY,
+      payload TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_by TEXT,
+      last_backup_at TEXT
+    );
+  ");
+
+  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_team_states_updated_at ON team_states(updated_at);");
+
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS team_activity_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team TEXT NOT NULL,
+      operator TEXT,
+      action TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    );
+  ");
+
+  $pdo->exec("CREATE INDEX IF NOT EXISTS idx_team_logs_team_created_at ON team_activity_logs(team, created_at DESC, id DESC);");
+
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS org_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      payload TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    );
 ");
   return $pdo;
 }
@@ -103,6 +129,69 @@ function ymd_range(string $start, string $end): array {
 function cn_week(string $ymd): string {
   $w = date('w', strtotime($ymd)); // 0..6
   return ['日','一','二','三','四','五','六'][$w] ?? '';
+}
+
+function now_local(): string {
+  return date('Y-m-d H:i:s');
+}
+
+function fetch_org_config_payload(PDO $pdo, bool $forceReload = false): array {
+  static $cached = null;
+  if ($forceReload) {
+    $cached = null;
+  }
+  if ($cached !== null) {
+    return $cached;
+  }
+  $stmt = $pdo->query('SELECT payload FROM org_config WHERE id = 1 LIMIT 1');
+  $row = $stmt->fetch();
+  $payload = [];
+  if ($row && isset($row['payload'])) {
+    $decoded = decode_json_assoc($row['payload']);
+    if ($decoded) {
+      $payload = $decoded;
+    }
+  }
+  $cached = $payload;
+  return $payload;
+}
+
+function backup_settings(PDO $pdo): array {
+  $config = fetch_org_config_payload($pdo);
+  $backup = [];
+  if (isset($config['backup']) && is_array($config['backup'])) {
+    $backup = $config['backup'];
+  }
+  $interval = 10;
+  if (isset($backup['intervalMinutes'])) {
+    $interval = (int)$backup['intervalMinutes'];
+  } elseif (isset($backup['interval_minutes'])) {
+    $interval = (int)$backup['interval_minutes'];
+  }
+  if ($interval < 1) $interval = 10;
+
+  $limit = 50;
+  if (isset($backup['limit'])) {
+    $limit = (int)$backup['limit'];
+  } elseif (isset($backup['maxCount'])) {
+    $limit = (int)$backup['maxCount'];
+  }
+  if ($limit < 1) $limit = 50;
+
+  return [
+    'interval' => $interval,
+    'limit' => $limit,
+  ];
+}
+
+function append_team_log(PDO $pdo, string $team, string $operator, string $action, string $detail = ''): void {
+  $stmt = $pdo->prepare('INSERT INTO team_activity_logs(team, operator, action, detail) VALUES(?,?,?,?)');
+  $stmt->execute([
+    $team,
+    $operator,
+    $action,
+    $detail,
+  ]);
 }
 
 function send_schedule_export(array $header, array $rows, string $filenameBase): void {
@@ -196,6 +285,154 @@ function build_schedule_payload(array $row, string $teamFallback): array {
     $merged['data'] = $dataMerged;
   }
   return $merged;
+}
+
+function normalize_schedule_payload(array $payload): array {
+  $normalized = $payload;
+
+  if (!isset($normalized['employees']) || !is_array($normalized['employees'])) {
+    $normalized['employees'] = [];
+  } else {
+    $normalized['employees'] = array_values(array_map(function ($value) {
+      return is_string($value) ? $value : (string)$value;
+    }, $normalized['employees']));
+  }
+
+  if (!isset($normalized['data']) || !is_array($normalized['data'])) {
+    $normalized['data'] = [];
+  } else {
+    $data = [];
+    foreach ($normalized['data'] as $day => $row) {
+      if (!is_string($day) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $day)) {
+        continue;
+      }
+      if (!is_array($row)) {
+        $row = [];
+      }
+      $rowClean = [];
+      foreach ($row as $emp => $val) {
+        if (!is_string($emp) || $emp === '') continue;
+        $value = '';
+        if (is_string($val)) {
+          $value = trim($val);
+        } elseif ($val === null) {
+          $value = '';
+        } else {
+          $value = trim((string)$val);
+        }
+        if ($value === '') {
+          continue;
+        }
+        $rowClean[$emp] = $value;
+      }
+      if (!empty($rowClean)) {
+        ksort($rowClean, SORT_STRING);
+        $data[$day] = $rowClean;
+      }
+    }
+    ksort($data, SORT_STRING);
+    $normalized['data'] = $data;
+  }
+
+  if (!isset($normalized['nightWindows']) || !is_array($normalized['nightWindows'])) {
+    $normalized['nightWindows'] = [];
+  } else {
+    $windows = [];
+    foreach ($normalized['nightWindows'] as $window) {
+      if (!is_array($window)) continue;
+      $start = isset($window['s']) ? (string)$window['s'] : (isset($window['start']) ? (string)$window['start'] : '');
+      $end = isset($window['e']) ? (string)$window['e'] : (isset($window['end']) ? (string)$window['end'] : '');
+      $start = $start ? substr($start, 0, 10) : '';
+      $end = $end ? substr($end, 0, 10) : '';
+      if ($start === '' && $end === '') continue;
+      $windows[] = ['s' => $start, 'e' => $end];
+    }
+    $normalized['nightWindows'] = $windows;
+  }
+
+  $mapFields = ['restPrefs', 'shiftColors', 'staffingAlerts', 'batchChecked', 'albumSelected', 'albumAssignments'];
+  foreach ($mapFields as $field) {
+    if (!isset($normalized[$field]) || !is_array($normalized[$field])) {
+      $normalized[$field] = [];
+    }
+  }
+
+  if (!isset($normalized['albumHistory']) || !is_array($normalized['albumHistory'])) {
+    $normalized['albumHistory'] = [];
+  }
+
+  return $normalized;
+}
+
+function merge_schedule_payload_changes(array $current, array $incoming, array $fieldFlags, array $dataChanges): array {
+  $merged = $current ?: [];
+  if (!isset($merged['data']) || !is_array($merged['data'])) {
+    $merged['data'] = [];
+  }
+  if (!isset($merged['employees']) || !is_array($merged['employees'])) {
+    $merged['employees'] = [];
+  }
+
+  foreach ($fieldFlags as $field => $flag) {
+    if (!$flag) continue;
+    $field = is_string($field) ? $field : (string)$field;
+    if (array_key_exists($field, $incoming)) {
+      $merged[$field] = $incoming[$field];
+      continue;
+    }
+    $snake = strtolower(preg_replace('/([a-z])([A-Z])/', '$1_$2', $field));
+    if ($snake !== $field && array_key_exists($snake, $incoming)) {
+      $merged[$field] = $incoming[$snake];
+    }
+  }
+
+  if (!empty($fieldFlags['employees']) && isset($incoming['employees'])) {
+    $merged['employees'] = $incoming['employees'];
+  }
+
+  if (!empty($fieldFlags['viewStart']) && isset($incoming['viewStart'])) {
+    $merged['start'] = $incoming['viewStart'];
+  }
+  if (!empty($fieldFlags['viewEnd']) && isset($incoming['viewEnd'])) {
+    $merged['end'] = $incoming['viewEnd'];
+  }
+
+  if (is_array($dataChanges) && !empty($dataChanges)) {
+    $data = $merged['data'];
+    foreach ($dataChanges as $day => $rowChanges) {
+      if (!is_string($day) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $day)) continue;
+      if (!is_array($rowChanges)) $rowChanges = [];
+      if (!isset($data[$day]) || !is_array($data[$day])) {
+        $data[$day] = [];
+      }
+      foreach ($rowChanges as $emp => $value) {
+        $empKey = is_string($emp) ? $emp : (string)$emp;
+        if ($empKey === '') continue;
+        if ($value === null) {
+          $valueStr = '';
+        } elseif (is_string($value)) {
+          $valueStr = trim($value);
+        } else {
+          $valueStr = trim((string)$value);
+        }
+        if ($valueStr === '') {
+          unset($data[$day][$empKey]);
+        } else {
+          $data[$day][$empKey] = $valueStr;
+        }
+      }
+      if (empty($data[$day])) {
+        unset($data[$day]);
+      }
+    }
+    $merged['data'] = $data;
+  }
+
+  return $merged;
+}
+
+function stable_json_encode($value): string {
+  return json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION);
 }
 
 function compute_history_profile(PDO $pdo, string $team, ?string $beforeStart = null, ?string $yearStart = null): array {
@@ -505,6 +742,61 @@ switch (true) {
     if (!$team) send_error('参数缺失', 400);
 
     $pdo = db();
+    $stateStmt = $pdo->prepare('SELECT payload, version, updated_at, updated_by, last_backup_at FROM team_states WHERE team=? LIMIT 1');
+    $stateStmt->execute([$team]);
+    $stateRow = $stateStmt->fetch();
+
+    if ($stateRow) {
+      $payloadArr = decode_json_assoc($stateRow['payload'] ?? '');
+      if (!$payloadArr) {
+        $payloadArr = [];
+      }
+      $employeesArr = $payloadArr['employees'] ?? [];
+      if (!is_array($employeesArr)) {
+        $employeesArr = [];
+      }
+      $dataArr = $payloadArr['data'] ?? [];
+      if (!is_array($dataArr)) {
+        $dataArr = [];
+      }
+      $employeesJson = json_encode(array_values($employeesArr), JSON_UNESCAPED_UNICODE);
+      if ($employeesJson === false) {
+        $employeesJson = json_encode(array_values($employeesArr), JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '[]';
+      }
+      $dataJson = json_encode($dataArr, JSON_UNESCAPED_UNICODE);
+      if ($dataJson === false) {
+        $dataJson = json_encode($dataArr, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
+      }
+      $payloadJson = json_encode($payloadArr, JSON_UNESCAPED_UNICODE);
+      if ($payloadJson === false) {
+        $payloadJson = json_encode($payloadArr, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
+      }
+      $viewStartPayload = $payloadArr['viewStart'] ?? ($payloadArr['start'] ?? ($payloadArr['view_start'] ?? ''));
+      $viewEndPayload = $payloadArr['viewEnd'] ?? ($payloadArr['end'] ?? ($payloadArr['view_end'] ?? ''));
+      $rowForBuild = [
+        'id' => $stateRow['version'] ?? null,
+        'team' => $team,
+        'view_start' => $viewStartPayload,
+        'view_end' => $viewEndPayload,
+        'employees' => $employeesJson,
+        'data' => $dataJson,
+        'note' => $payloadArr['note'] ?? '',
+        'created_at' => $stateRow['updated_at'] ?? null,
+        'created_by_name' => $stateRow['updated_by'] ?? null,
+        'payload' => $payloadJson,
+      ];
+      $result = build_schedule_payload($rowForBuild, $team);
+      $version = isset($stateRow['version']) ? (int)$stateRow['version'] : null;
+      $result['versionId'] = $version;
+      $result['version_id'] = $version;
+      $result['updated_at'] = $stateRow['updated_at'] ?? null;
+      $result['updated_by'] = $stateRow['updated_by'] ?? null;
+      $result['lastBackupAt'] = $stateRow['last_backup_at'] ?? null;
+      $rangeStart = $start ?: ($result['viewStart'] ?? null);
+      $result['historyProfile'] = compute_history_profile($pdo, $team, $rangeStart, $historyYearStart);
+      send_json($result);
+    }
+
     $row = null;
     if ($start && $end) {
       $stmt = $pdo->prepare("
@@ -554,7 +846,7 @@ switch (true) {
       send_json($result);
     }
 
-  // 保存（新版本）——乐观锁：baseVersionId 不等于最新时返回 409
+  // 保存（实时版本）——基于团队状态的乐观锁
   case $method === 'POST' && $path === '/schedule/save':
     $in   = json_input();
     $team = (string)($in['team'] ?? 'default');
@@ -571,82 +863,219 @@ switch (true) {
     }
 
     $pdo = db();
-    $stmt = $pdo->prepare("
-      SELECT id FROM schedule_versions
-      WHERE team=? AND view_start=? AND view_end=?
-      ORDER BY id DESC LIMIT 1
-    ");
-    $stmt->execute([$team, $vs, $ve]);
-    $cur = $stmt->fetch();
-    $latestId = $cur ? (int)$cur['id'] : null;
+    $now = now_local();
+    $pdo->beginTransaction();
+    try {
+      $stmt = $pdo->prepare('SELECT version, last_backup_at, payload, updated_at, updated_by FROM team_states WHERE team=? LIMIT 1');
+      $stmt->execute([$team]);
+      $stateRow = $stmt->fetch();
+      $currentVersion = $stateRow ? (int)$stateRow['version'] : null;
+      $lastBackupAt = $stateRow['last_backup_at'] ?? null;
+      $currentPayloadRaw = $stateRow && isset($stateRow['payload']) ? decode_json_assoc($stateRow['payload']) : [];
+      $currentPayload = is_array($currentPayloadRaw) ? $currentPayloadRaw : [];
+      $currentNormalized = normalize_schedule_payload($currentPayload);
+      $previousUpdatedAt = $stateRow['updated_at'] ?? null;
 
-    if ($latestId !== null && $base !== null && (int)$base !== $latestId) {
-      send_error('保存冲突：已有新版本', 409, ['code'=>409,'latest_version_id'=>$latestId]);
-    }
+      $changesInput = $in['changes'] ?? null;
+      $fieldFlags = [];
+      $dataChanges = [];
+      if (is_array($changesInput)) {
+        if (isset($changesInput['fields']) && is_array($changesInput['fields'])) {
+          foreach ($changesInput['fields'] as $key => $flag) {
+            if ($flag) {
+              $fieldFlags[(string)$key] = true;
+            }
+          }
+        }
+        if (isset($changesInput['data']) && is_array($changesInput['data'])) {
+          $dataChanges = $changesInput['data'];
+        }
+      }
 
-    $snapshot = [
-      'team' => $team,
-      'viewStart' => $vs,
-      'viewEnd' => $ve,
-      'start' => $vs,
-      'end' => $ve,
-      'employees' => array_values($emps),
-      'data' => $data,
-      'note' => $note,
-      'adminDays' => $in['adminDays'] ?? null,
-      'restPrefs' => $in['restPrefs'] ?? null,
-      'nightRules' => $in['nightRules'] ?? null,
-      'nightWindows' => $in['nightWindows'] ?? null,
-      'nightOverride' => $in['nightOverride'] ?? null,
-      'rMin' => $in['rMin'] ?? null,
-      'rMax' => $in['rMax'] ?? null,
-      'pMin' => $in['pMin'] ?? null,
-      'pMax' => $in['pMax'] ?? null,
-      'mixMax' => $in['mixMax'] ?? null,
-      'shiftColors' => $in['shiftColors'] ?? null,
-      'staffingAlerts' => $in['staffingAlerts'] ?? null,
-      'batchChecked' => $in['batchChecked'] ?? null,
-      'albumSelected' => $in['albumSelected'] ?? null,
-      'albumWhiteHour' => $in['albumWhiteHour'] ?? null,
-      'albumMidHour' => $in['albumMidHour'] ?? null,
-      'albumRangeStartMonth' => $in['albumRangeStartMonth'] ?? null,
-      'albumRangeEndMonth' => $in['albumRangeEndMonth'] ?? null,
-      'albumMaxDiff' => $in['albumMaxDiff'] ?? null,
-      'albumAssignments' => $in['albumAssignments'] ?? null,
-      'albumAutoNote' => $in['albumAutoNote'] ?? null,
-      'albumHistory' => $in['albumHistory'] ?? null,
-      'historyProfile' => $in['historyProfile'] ?? null,
-      'yearlyOptimize' => $in['yearlyOptimize'] ?? null,
-      'operator' => $operator ?: '管理员',
-    ];
-    $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE);
-    if ($snapshotJson === false) {
-      $snapshotJson = json_encode($snapshot, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
-    }
+      if ($currentVersion !== null && $base !== null && (int)$base !== $currentVersion && empty($fieldFlags) && empty($dataChanges)) {
+        $pdo->rollBack();
+        send_error('保存冲突：已有新版本', 409, ['code' => 409, 'latest_version_id' => $currentVersion]);
+      }
 
-    $employeesJson = json_encode(array_values($emps), JSON_UNESCAPED_UNICODE);
-    if ($employeesJson === false) {
-      $employeesJson = json_encode(array_values($emps), JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '[]';
-    }
-    $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE);
-    if ($dataJson === false) {
-      $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
-    }
+      $snapshot = [
+        'team' => $team,
+        'viewStart' => $vs,
+        'viewEnd' => $ve,
+        'start' => $vs,
+        'end' => $ve,
+        'employees' => array_values($emps),
+        'data' => $data,
+        'note' => $note,
+        'adminDays' => $in['adminDays'] ?? null,
+        'restPrefs' => $in['restPrefs'] ?? null,
+        'nightRules' => $in['nightRules'] ?? null,
+        'nightWindows' => $in['nightWindows'] ?? null,
+        'nightOverride' => $in['nightOverride'] ?? null,
+        'rMin' => $in['rMin'] ?? null,
+        'rMax' => $in['rMax'] ?? null,
+        'pMin' => $in['pMin'] ?? null,
+        'pMax' => $in['pMax'] ?? null,
+        'mixMax' => $in['mixMax'] ?? null,
+        'shiftColors' => $in['shiftColors'] ?? null,
+        'staffingAlerts' => $in['staffingAlerts'] ?? null,
+        'batchChecked' => $in['batchChecked'] ?? null,
+        'albumSelected' => $in['albumSelected'] ?? null,
+        'albumWhiteHour' => $in['albumWhiteHour'] ?? null,
+        'albumMidHour' => $in['albumMidHour'] ?? null,
+        'albumRangeStartMonth' => $in['albumRangeStartMonth'] ?? null,
+        'albumRangeEndMonth' => $in['albumRangeEndMonth'] ?? null,
+        'albumMaxDiff' => $in['albumMaxDiff'] ?? null,
+        'albumAssignments' => $in['albumAssignments'] ?? null,
+        'albumAutoNote' => $in['albumAutoNote'] ?? null,
+        'albumHistory' => $in['albumHistory'] ?? null,
+        'historyProfile' => $in['historyProfile'] ?? null,
+        'yearlyOptimize' => $in['yearlyOptimize'] ?? null,
+      ];
 
-    $stmt = $pdo->prepare("
-      INSERT INTO schedule_versions(team, view_start, view_end, employees, data, note, created_by_name, payload)
-      VALUES(?,?,?,?,?,?,?,?)
-    ");
-    $stmt->execute([
-      $team, $vs, $ve,
-      $employeesJson,
-      $dataJson,
-      $note,
-      $operator ?: '管理员',
-      $snapshotJson
+      $incomingNormalized = normalize_schedule_payload($snapshot);
+
+      if ($currentVersion !== null && $base !== null && (int)$base !== $currentVersion) {
+        $merged = merge_schedule_payload_changes($currentNormalized, $incomingNormalized, $fieldFlags, $dataChanges);
+        $finalSnapshot = normalize_schedule_payload($merged);
+      } else {
+        $finalSnapshot = $incomingNormalized;
+      }
+
+      $finalSnapshot['team'] = $team;
+      if (!isset($finalSnapshot['viewStart']) || $finalSnapshot['viewStart'] === '') {
+        $finalSnapshot['viewStart'] = $vs;
+      }
+      if (!isset($finalSnapshot['viewEnd']) || $finalSnapshot['viewEnd'] === '') {
+        $finalSnapshot['viewEnd'] = $ve;
+      }
+      if (!isset($finalSnapshot['start']) || $finalSnapshot['start'] === '') {
+        $finalSnapshot['start'] = $finalSnapshot['viewStart'];
+      }
+      if (!isset($finalSnapshot['end']) || $finalSnapshot['end'] === '') {
+        $finalSnapshot['end'] = $finalSnapshot['viewEnd'];
+      }
+
+      $existingEncoded = stable_json_encode($currentNormalized);
+      $newEncoded = stable_json_encode($finalSnapshot);
+      $hasChange = ($existingEncoded !== $newEncoded);
+
+      if (!$hasChange) {
+        $pdo->rollBack();
+        send_json([
+          'ok' => true,
+          'version_id' => $currentVersion,
+          'versionId' => $currentVersion,
+          'updated_at' => $previousUpdatedAt ?? $now,
+          'updatedAt' => $previousUpdatedAt ?? $now,
+          'last_backup_at' => $lastBackupAt,
+          'lastBackupAt' => $lastBackupAt,
+        ]);
+      }
+
+      $snapshotJson = json_encode($finalSnapshot, JSON_UNESCAPED_UNICODE);
+      if ($snapshotJson === false) {
+        $snapshotJson = json_encode($finalSnapshot, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
+      }
+
+      $newVersion = ($currentVersion ?? 0) + 1;
+
+      if ($currentVersion === null) {
+        $stmt = $pdo->prepare('INSERT INTO team_states(team, payload, version, updated_at, updated_by, last_backup_at) VALUES(?,?,?,?,?,NULL)');
+        $stmt->execute([$team, $snapshotJson, $newVersion, $now, $operator ?: '管理员']);
+      } else {
+        $stmt = $pdo->prepare('UPDATE team_states SET payload=?, version=?, updated_at=?, updated_by=? WHERE team=?');
+        $stmt->execute([$snapshotJson, $newVersion, $now, $operator ?: '管理员', $team]);
+      }
+
+      $settings = backup_settings($pdo);
+      $intervalMinutes = max(1, (int)($settings['interval'] ?? 10));
+      $limitCount = max(1, (int)($settings['limit'] ?? 50));
+
+      $shouldBackup = false;
+      if (!$lastBackupAt) {
+        $shouldBackup = true;
+      } else {
+        $lastTs = strtotime((string)$lastBackupAt);
+        if ($lastTs === false) {
+          $shouldBackup = true;
+        } else {
+          $shouldBackup = (strtotime($now) - $lastTs) >= ($intervalMinutes * 60);
+        }
+      }
+
+      $employeesList = $finalSnapshot['employees'] ?? [];
+      if (!is_array($employeesList)) {
+        $employeesList = [];
+      }
+      $dataMap = $finalSnapshot['data'] ?? [];
+      if (!is_array($dataMap)) {
+        $dataMap = [];
+      }
+
+      $backupCreatedAt = $lastBackupAt;
+      if ($shouldBackup) {
+        $employeesJson = json_encode(array_values($employeesList), JSON_UNESCAPED_UNICODE);
+        if ($employeesJson === false) {
+          $employeesJson = json_encode(array_values($employeesList), JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '[]';
+        }
+        $dataJson = json_encode($dataMap, JSON_UNESCAPED_UNICODE);
+        if ($dataJson === false) {
+          $dataJson = json_encode($dataMap, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) ?: '{}';
+        }
+        $stmt = $pdo->prepare("
+          INSERT INTO schedule_versions(team, view_start, view_end, employees, data, note, created_by_name, payload)
+          VALUES(?,?,?,?,?,?,?,?)
+        ");
+        $stmt->execute([
+          $team,
+          $finalSnapshot['viewStart'],
+          $finalSnapshot['viewEnd'],
+          $employeesJson,
+          $dataJson,
+          ($finalSnapshot['note'] ?? '') !== '' ? (string)$finalSnapshot['note'] : '自动备份',
+          $operator ?: '管理员',
+          $snapshotJson,
+        ]);
+        $backupCreatedAt = $now;
+
+        if ($limitCount > 0) {
+          $stmt = $pdo->prepare('SELECT id FROM schedule_versions WHERE team=? ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?');
+          $stmt->execute([$team, $limitCount]);
+          $toDelete = $stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+          if ($toDelete) {
+            $placeholders = implode(',', array_fill(0, count($toDelete), '?'));
+            $del = $pdo->prepare("DELETE FROM schedule_versions WHERE id IN ($placeholders)");
+            $del->execute($toDelete);
+          }
+        }
+
+        $stmt = $pdo->prepare('UPDATE team_states SET last_backup_at=? WHERE team=?');
+        $stmt->execute([$backupCreatedAt, $team]);
+      }
+
+      $summary = sprintf('更新排班：%s ~ %s，人员 %d 名', $finalSnapshot['viewStart'], $finalSnapshot['viewEnd'], count($employeesList));
+      $finalNote = isset($finalSnapshot['note']) ? (string)$finalSnapshot['note'] : '';
+      if ($finalNote !== '') {
+        $summary .= '，备注：' . $finalNote;
+      }
+      append_team_log($pdo, $team, $operator ?: '管理员', 'update_schedule', $summary);
+
+      $pdo->commit();
+    } catch (Throwable $e) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      throw $e;
+    }
+    send_json([
+      'ok' => true,
+      'version_id' => $newVersion,
+      'versionId' => $newVersion,
+      'updated_at' => $now,
+      'updatedAt' => $now,
+      'last_backup_at' => $backupCreatedAt,
+      'lastBackupAt' => $backupCreatedAt,
     ]);
-    $newId = (int)$pdo->lastInsertId();
-    send_json(['ok'=>true, 'version_id'=>$newId]);
 
   // 历史版本列表
   case $method === 'GET' && $path === '/schedule/versions':
@@ -723,6 +1152,75 @@ switch (true) {
     if ($stmt->rowCount() === 0) send_error('记录不存在或已删除', 404);
     send_json(['ok' => true, 'deleted' => true]);
 
+  case $method === 'GET' && $path === '/team/logs':
+    $team = trim((string)($_GET['team'] ?? ''));
+    $limit = (int)($_GET['limit'] ?? 50);
+    if ($team === '') send_error('参数缺失', 400);
+    if ($limit <= 0) $limit = 50;
+    if ($limit > 200) $limit = 200;
+    $pdo = db();
+    $stmt = $pdo->prepare('SELECT id, operator, action, detail, created_at FROM team_activity_logs WHERE team=? ORDER BY created_at DESC, id DESC LIMIT ?');
+    $stmt->execute([$team, $limit]);
+    $rows = $stmt->fetchAll() ?: [];
+    $logs = array_map(function($row) {
+      return [
+        'id' => isset($row['id']) ? (int)$row['id'] : null,
+        'operator' => $row['operator'] ?? '管理员',
+        'action' => $row['action'] ?? '',
+        'detail' => $row['detail'] ?? '',
+        'created_at' => $row['created_at'] ?? null,
+      ];
+    }, $rows);
+    send_json(['logs' => $logs]);
+
+  case $method === 'GET' && $path === '/team/logs/export':
+    $team = trim((string)($_GET['team'] ?? ''));
+    if ($team === '') send_error('参数缺失', 400);
+    $start = trim((string)($_GET['start'] ?? ''));
+    $end = trim((string)($_GET['end'] ?? ''));
+    if ($start !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $start)) {
+      send_error('开始时间格式错误', 400);
+    }
+    if ($end !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $end)) {
+      send_error('结束时间格式错误', 400);
+    }
+    if ($start !== '' && $end !== '' && $start > $end) {
+      $tmp = $start;
+      $start = $end;
+      $end = $tmp;
+    }
+    $pdo = db();
+    $sql = 'SELECT operator, action, detail, created_at FROM team_activity_logs WHERE team=?';
+    $params = [$team];
+    if ($start !== '') {
+      $sql .= ' AND created_at >= ?';
+      $params[] = $start . ' 00:00:00';
+    }
+    if ($end !== '') {
+      $sql .= ' AND created_at <= ?';
+      $params[] = $end . ' 23:59:59';
+    }
+    $sql .= ' ORDER BY created_at ASC, id ASC';
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll() ?: [];
+    $header = ['时间', '团队', '操作者', '动作', '详情'];
+    $csvRows = [];
+    foreach ($rows as $row) {
+      $csvRows[] = [
+        $row['created_at'] ?? '',
+        $team,
+        $row['operator'] ?? '管理员',
+        $row['action'] ?? '',
+        $row['detail'] ?? '',
+      ];
+    }
+    $filename = '操作日志_' . $team;
+    if ($start !== '' || $end !== '') {
+      $filename .= '_' . ($start !== '' ? $start : '开始') . '_' . ($end !== '' ? $end : '结束');
+    }
+    send_schedule_export($header, $csvRows, $filename);
+
   case $method === 'GET' && $path === '/org-config':
     $pdo = db();
     $stmt = $pdo->query('SELECT payload, updated_at FROM org_config WHERE id = 1 LIMIT 1');
@@ -762,6 +1260,7 @@ switch (true) {
       ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at
     ");
     $stmt->execute([$json]);
+    fetch_org_config_payload($pdo, true);
     send_json(['ok' => true]);
 
   case $method === 'GET' && $path === '/template/xlsx':
