@@ -144,8 +144,53 @@
       return `album_${fallbackIndex}`;
     }
 
-    async function apiGet(path){ const r = await fetch(API_BASE + path, { credentials: 'include' }); if(!r.ok){ let msg='请求失败'; try { const e=await r.json(); msg=e.message||msg; } catch{} throw new Error(msg); } return r.json(); }
-    async function apiPost(path, body){ const r = await fetch(API_BASE + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body||{}), credentials: 'include' }); if(!r.ok){ let ejson=null; try { ejson = await r.json(); } catch{} const err = new Error((ejson&&ejson.message)||'请求失败'); if(ejson) err.payload = ejson; throw err; } return r.json(); }
+    const AUTH_REQUIRED_EVENT = 'scheduler:auth-required';
+    const READONLY_TOOLTIP = '只读权限：不可编辑';
+    function emitAuthRequired(){
+      try{
+        window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+      }catch{}
+    }
+    async function apiGet(path){
+      const r = await fetch(API_BASE + path, { credentials: 'include' });
+      if(!r.ok){
+        let payload = null;
+        let msg = '请求失败';
+        try{
+          payload = await r.json();
+          if(payload && payload.message) msg = payload.message;
+        }catch{}
+        if(r.status === 401){
+          emitAuthRequired(msg);
+          const err = new Error(payload?.message || '登录状态已失效，请重新登录');
+          err.code = 'UNAUTHORIZED';
+          if(payload) err.payload = payload;
+          throw err;
+        }
+        const err = new Error(msg);
+        if(payload) err.payload = payload;
+        throw err;
+      }
+      return r.json();
+    }
+    async function apiPost(path, body){
+      const r = await fetch(API_BASE + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body||{}), credentials: 'include' });
+      if(!r.ok){
+        let ejson = null;
+        try{ ejson = await r.json(); }catch{}
+        if(r.status === 401){
+          emitAuthRequired(ejson?.message);
+          const authErr = new Error((ejson && ejson.message) || '登录状态已失效，请重新登录');
+          authErr.code = 'UNAUTHORIZED';
+          if(ejson) authErr.payload = ejson;
+          throw authErr;
+        }
+        const err = new Error((ejson&&ejson.message)||'请求失败');
+        if(ejson) err.payload = ejson;
+        throw err;
+      }
+      return r.json();
+    }
 
     const isWork = (v)=> !!(v && v!=='休');
     function getVal(data, day, emp){ return (data[day]||{})[emp]||''; }
@@ -570,16 +615,16 @@
       );
     }
 
-    function TeamSwitcher({teams, value, onChange, disabled, onManage, canManage}){
+    function TeamSwitcher({teams, value, onChange, disabled, onManage, canManage, disabledTitle=''}){
       const hasTeams = teams && teams.length>0;
       return (
         <div className="flex items-center gap-2">
           <select className={`border rounded px-3 py-1.5 ${disabled?'bg-gray-100 cursor-not-allowed':''}`} value={hasTeams? value : ''}
-            onChange={e=> onChange(e.target.value)} disabled={disabled || !hasTeams}>
+            onChange={e=> onChange(e.target.value)} disabled={disabled || !hasTeams} title={disabled ? disabledTitle : ''}>
             {hasTeams ? teams.map(team=> <option key={team.id} value={team.id}>{team.name}</option>) : <option value="">暂无团队</option>}
           </select>
           {canManage && (
-            <button type="button" onClick={onManage} className="p-1.5 rounded-full border text-gray-500 hover:text-indigo-600 hover:border-indigo-300" title="管理团队与权限">
+            <button type="button" onClick={onManage} className={`p-1.5 rounded-full border text-gray-500 ${disabled?'cursor-not-allowed bg-gray-100':'hover:text-indigo-600 hover:border-indigo-300'}`} title={disabled ? disabledTitle : '管理团队与权限'} disabled={disabled}>
               <Icon name="cog" />
             </button>
           )}
@@ -709,7 +754,7 @@
       );
     }
 
-    const MonthInput = React.memo(function MonthInputComponent({ value, onChange, disabled=false, className='', placeholder='YYYY-MM' }){
+    const MonthInput = React.memo(function MonthInputComponent({ value, onChange, disabled=false, className='', placeholder='YYYY-MM', disabledTitle='' }){
       const [draft, setDraft] = useState(()=> value || '');
       useEffect(()=>{ setDraft(value || ''); }, [value]);
       const format = (raw)=>{
@@ -756,6 +801,7 @@
           value={draft}
           placeholder={placeholder}
           disabled={disabled}
+          title={disabled ? disabledTitle : ''}
           onChange={handleChange}
           onBlur={handleBlur}
         />
@@ -764,7 +810,37 @@
 
     function App(){
       const [user, setUser] = useState(null);
-      useEffect(()=>{ (async()=>{ try{ await apiPost('/logout',{}); } catch{} finally { setUser(null); } })(); },[]);
+      const [authChecked, setAuthChecked] = useState(false);
+      useEffect(()=>{
+        let cancelled = false;
+        (async()=>{
+          try{
+            const res = await apiGet('/me');
+            if(cancelled) return;
+            if(res && res.user){
+              setUser(res.user);
+            } else {
+              setUser(null);
+            }
+          }catch(err){
+            if(cancelled) return;
+            if(err && err.code !== 'UNAUTHORIZED'){
+              console.warn('加载用户信息失败', err);
+            }
+            setUser(null);
+          }finally{
+            if(!cancelled){
+              setAuthChecked(true);
+            }
+          }
+        })();
+        return ()=>{ cancelled = true; };
+      }, []);
+      useEffect(()=>{
+        const handler = ()=> setUser(null);
+        window.addEventListener(AUTH_REQUIRED_EVENT, handler);
+        return ()=> window.removeEventListener(AUTH_REQUIRED_EVENT, handler);
+      }, []);
 
       const [orgConfig, setOrgConfig] = useState(()=>{
         try{
@@ -865,6 +941,7 @@
       const [versions, setVersions]   = useState([]);
       const [versionsLoading, setVersionsLoading] = useState(false);
       const [showAutoSaves, setShowAutoSaves] = useState(false);
+      const [newVersionBanner, setNewVersionBanner] = useState(null);
       const filteredVersions = useMemo(()=>{
         if(showAutoSaves) return versions;
         return versions.filter(v=>{
@@ -1178,9 +1255,22 @@
         }
       }, [allowedTabs, tab]);
 
-      const viewReadOnly = menuPerms[tab]?.editable === false;
-      const editingLocked = prog.running || viewReadOnly;
+      const isReadOnly = menuPerms[tab]?.editable === false;
+      const editingLocked = prog.running || isReadOnly;
+      const lockTitle = isReadOnly ? READONLY_TOOLTIP : (prog.running ? '执行中：只读' : '');
+      const ensureWritable = useCallback(()=>{
+        if(prog.running){
+          alert('执行中：请稍后再试');
+          return false;
+        }
+        if(isReadOnly){
+          showToast(READONLY_TOOLTIP, 'error');
+          return false;
+        }
+        return true;
+      }, [prog.running, isReadOnly]);
       useEffect(()=>{ setVersions([]); }, [team]);
+      useEffect(()=>{ setNewVersionBanner(null); }, [team]);
 
       const menuLabels = {
         grid: '排班表格',
@@ -1192,6 +1282,7 @@
         settings: '设置 / 导出',
         roles: '角色设置'
       };
+      const userDisplayName = user ? (user.display_name || user.displayName || user.username || '') : '';
 
       const addTeam = ()=>{
         updateOrgConfig(prev=>{
@@ -1675,6 +1766,7 @@
         }
       }
       async function saveToServer(){
+        if(!ensureWritable()) return;
         try{
           const payload = buildSavePayload();
           const res = await apiPost('/schedule/save', payload);
@@ -1693,9 +1785,11 @@
           }
         } catch(e){
           if(e.payload && e.payload.code===409){
-            if(confirm('服务器已有新版本，是否加载最新并覆盖？')) await loadFromServer();
+            showToast('检测到服务器有新版本，请先读取最新版本', 'error');
+            await loadVersions();
             return;
           }
+          if(e && e.code === 'UNAUTHORIZED') return;
           globalErr(e.message);
         }
       }
@@ -1720,12 +1814,16 @@
           });
           setVersions(list);
           if(list.length){
-            const latestId = list[0]?.id;
-            if(latestId && lastLoadedVersionRef.current[trimmedTeam] !== latestId){
-              await loadVersionById(latestId, { silent:true });
+            const latest = list[0];
+            const latestId = latest?.id;
+            const lastLoaded = lastLoadedVersionRef.current[trimmedTeam];
+            const operator = (latest?.created_by_name || latest?.created_by || '').trim();
+            if(latestId && lastLoaded && latestId !== lastLoaded && operator !== '自动保存' && trimmedTeam === (team || '').trim()){
+              setNewVersionBanner(prev=> prev && prev.id === latestId ? prev : { id: latestId, team: trimmedTeam, createdAt: latest?.created_at || latest?.createdAt || '' });
             }
           } else {
             delete lastLoadedVersionRef.current[trimmedTeam];
+            setNewVersionBanner(null);
           }
         } catch(e){
           globalErr(e.message);
@@ -1738,6 +1836,7 @@
           const res = await apiGet(`/version?id=${id}`);
           applyServerState({ ...res, versionId: id });
           lastLoadedVersionRef.current[team] = id;
+          setNewVersionBanner(prev=> prev && prev.id === id ? null : prev);
         } catch(e){
           if(!options?.silent){
             globalErr(e.message);
@@ -1836,7 +1935,7 @@
         }
       }
       function downloadTemplate(){ window.location.href = `${API_BASE}/template/xlsx`; }
-      function openImportPicker(){ if(editingLocked) return; if(importInputRef.current){ importInputRef.current.click(); } }
+      function openImportPicker(){ if(!ensureWritable()) return; if(importInputRef.current){ importInputRef.current.click(); } }
       async function importScheduleFile(file){
         if(!file) return;
         setImporting(true);
@@ -1949,7 +2048,8 @@
         if(el) el.focus();
       }, [dateCount, empCount]);
       const openPickerAt = useCallback((di, ei, anchorEl)=>{
-        if(editingLocked) return;
+        if(prog.running){ alert('执行中：请稍后再试'); return; }
+        if(isReadOnly){ showToast(READONLY_TOOLTIP, 'error'); return; }
         const el = anchorEl || document.getElementById(`cell-${di}-${ei}`);
         if(!el) return;
         const rect = el.getBoundingClientRect();
@@ -1976,7 +2076,7 @@
           }
         }
         setPicker({ open:true, di, ei, x:left, y:top, placement });
-      }, [editingLocked]);
+      }, [prog.running, isReadOnly, showToast]);
       const onKeyDownCell = useCallback((e, di, ei)=>{
         if(e.isComposing) return;
         if(e.altKey && (e.key==='ArrowDown' || e.key==='Enter')){
@@ -2062,15 +2162,15 @@
                   <div className="cell-wrap">
                     <input list="shift-options" id={`cell-${di}-${ei}`} className="cell border rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-300 focus:outline-none transition disabled:bg-gray-100"
                       style={{ backgroundColor: bg }} value={value}
-                      disabled={editingLocked}
-                      title={editingLocked? '执行中：只读' : ''}
+                        disabled={editingLocked}
+                        title={editingLocked? lockTitle : ''}
                       onFocus={()=> onFocusCell(di, ei)}
                       onKeyDown={(ev)=> onKeyDownCell(ev, di, ei)}
                       onCompositionStart={(ev)=>{ ev.target.isComposing = true; }}
                       onCompositionEnd={(ev)=>{ ev.target.isComposing = false; setCellByIndex(di, ei, ev.currentTarget.value); }}
                       onChange={ev=> setCellByIndex(di, ei, ev.target.value)}
-                      onDoubleClick={(ev)=>{ if(editingLocked) return; openPickerAt(di, ei, ev.currentTarget); }} placeholder="白/中1/中2/夜/休 或留空" />
-                    <button className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title="选择班次"
+                      onDoubleClick={(ev)=>{ if(prog.running){ alert('执行中：请稍后再试'); return; } if(isReadOnly){ showToast(READONLY_TOOLTIP, 'error'); return; } openPickerAt(di, ei, ev.currentTarget); }} placeholder="白/中1/中2/夜/休 或留空" />
+                    <button className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title={editingLocked?lockTitle:'选择班次'}
                       onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
                       <span className="sr-only">打开班次选择器</span>
                     </button>
@@ -2197,12 +2297,12 @@
       }, [viewYear, employees, data]);
 
       const ViewGrid = (
-        <Section title="排班表格" right={<span className="text-sm text-gray-500">提示：点击单元格→直接输入或从 Excel 粘贴；支持 IME 连续输入 {editingLocked && <span className='inline-flex items-center gap-1 text-rose-600 ml-2'><Icon name='lock'/>执行中：只读</span>}</span>}>
+        <Section title="排班表格" right={<span className="text-sm text-gray-500">提示：点击单元格→直接输入或从 Excel 粘贴；支持 IME 连续输入 {editingLocked && <span className='inline-flex items-center gap-1 text-rose-600 ml-2'><Icon name='lock'/>{lockTitle}</span>}</span>}>
           {employees.length===0 ? (
             <div className="text-sm text-gray-500">请先在「员工管理」中添加员工。</div>
           ) : (
             <>
-              <div className="grid-wrap border rounded-xl shadow-inner" onPaste={(e)=>{ if(editingLocked) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}>
+          <div className="grid-wrap border rounded-xl shadow-inner" onPaste={(e)=>{ if(isReadOnly){ showToast(READONLY_TOOLTIP, 'error'); return; } if(prog.running) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}>
                 <table className="min-w-max text-sm w-full">
                   <thead>
                     <tr className="bg-gray-50">
@@ -2279,15 +2379,15 @@
             <div className="flex items-center justify-between text-xs text-gray-600 mb-2">
               <div>当前筛选：{filtered.length} 人；已选 {selectedCount} 人</div>
               <div className="space-x-2">
-                <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} onClick={()=> withStay(()=>{ const next={...batchChecked}; filtered.forEach(n=> next[n]=true); setBatchChecked(next); })}>全选</button>
-                <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} onClick={()=> withStay(()=> setBatchChecked(prev=>{ const next={...prev}; filtered.forEach(n=> next[n]=!prev[n]); return next; }))}>反选</button>
-                <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} onClick={()=> withStay(()=> setBatchChecked(prev=>{ const next={...prev}; filtered.forEach(n=> { next[n]=false; }); return next; }))}>清空</button>
+                <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} title={editingLocked?lockTitle:''} onClick={()=> withStay(()=>{ const next={...batchChecked}; filtered.forEach(n=> next[n]=true); setBatchChecked(next); })}>全选</button>
+                <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} title={editingLocked?lockTitle:''} onClick={()=> withStay(()=> setBatchChecked(prev=>{ const next={...prev}; filtered.forEach(n=> next[n]=!prev[n]); return next; }))}>反选</button>
+                <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} title={editingLocked?lockTitle:''} onClick={()=> withStay(()=> setBatchChecked(prev=>{ const next={...prev}; filtered.forEach(n=> { next[n]=false; }); return next; }))}>清空</button>
               </div>
             </div>
             <div ref={listRef} className="divide-y">
               {filtered.map(name=> (
                 <label key={name} className="flex items-center gap-2 py-1">
-                  <input type="checkbox" disabled={editingLocked} checked={!!batchChecked[name]} onChange={()=> withStay(()=> setBatchChecked(p=>({ ...p, [name]: !p[name] })))} />
+                  <input type="checkbox" disabled={editingLocked} title={editingLocked?lockTitle:''} checked={!!batchChecked[name]} onChange={()=> withStay(()=> setBatchChecked(p=>({ ...p, [name]: !p[name] })))} />
                   <span className="text-sm">{name}</span>
                 </label>
               ))}
@@ -2311,15 +2411,15 @@
             <div className="flex items-center justify-between text-xs text-gray-600 mb-2">
               <div>当前筛选：{filtered.length} 人；选中 {selectedCount} 人</div>
               <div className="space-x-1">
-                <button className={`px-2 py-1 rounded border text-xs ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} onClick={()=> withStay(()=>{ const next={...albumSelected}; filtered.forEach(n=> next[n]=true); setAlbumSelected(next); })}>全选</button>
-                <button className={`px-2 py-1 rounded border text-xs ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked || filtered.length===0} onClick={()=> withStay(()=> setAlbumSelected(prev=>{ const next={...prev}; filtered.forEach(n=>{ next[n] = !prev[n]; }); return next; }))}>反选</button>
-                <button className={`px-2 py-1 rounded border text-xs ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked || filtered.length===0} onClick={()=> withStay(()=> setAlbumSelected(prev=>{ const next={...prev}; filtered.forEach(n=>{ next[n] = false; }); return next; }))}>清空</button>
+                <button className={`px-2 py-1 rounded border text-xs ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked} title={editingLocked?lockTitle:''} onClick={()=> withStay(()=>{ const next={...albumSelected}; filtered.forEach(n=> next[n]=true); setAlbumSelected(next); })}>全选</button>
+                <button className={`px-2 py-1 rounded border text-xs ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked || filtered.length===0} title={editingLocked?lockTitle:(filtered.length===0?'暂无可操作项':'')} onClick={()=> withStay(()=> setAlbumSelected(prev=>{ const next={...prev}; filtered.forEach(n=>{ next[n] = !prev[n]; }); return next; }))}>反选</button>
+                <button className={`px-2 py-1 rounded border text-xs ${editingLocked?'opacity-50 cursor-not-allowed':''}`} disabled={editingLocked || filtered.length===0} title={editingLocked?lockTitle:(filtered.length===0?'暂无可操作项':'')} onClick={()=> withStay(()=> setAlbumSelected(prev=>{ const next={...prev}; filtered.forEach(n=>{ next[n] = false; }); return next; }))}>清空</button>
               </div>
             </div>
               <div ref={listRef} className="divide-y">
               {filtered.map(name=> (
                 <label key={name} className="flex items-center gap-2 py-1 text-sm">
-                  <input type="checkbox" checked={!!albumSelected[name]} disabled={editingLocked} onChange={()=> withStay(()=> setAlbumSelected(prev=> ({ ...prev, [name]: !prev[name] })))} />
+                  <input type="checkbox" checked={!!albumSelected[name]} disabled={editingLocked} title={editingLocked?lockTitle:''} onChange={()=> withStay(()=> setAlbumSelected(prev=> ({ ...prev, [name]: !prev[name] })))} />
                   <span>{name}</span>
                 </label>
               ))}
@@ -2378,12 +2478,12 @@
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <label className="inline-flex items-center gap-2">开始
                   <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planStart}
-                    onChange={e=> setPlanStart(e.target.value)} disabled={editingLocked} />
+                    onChange={e=> setPlanStart(e.target.value)} disabled={editingLocked} title={editingLocked?lockTitle:''} />
                 </label>
                 <span className="text-gray-400">—</span>
                 <label className="inline-flex items-center gap-2">结束
                   <input type="date" className={`border rounded px-2 py-1 ${editingLocked?'bg-gray-100':''}`} value={planEnd}
-                    onChange={e=> setPlanEnd(e.target.value)} disabled={editingLocked} />
+                    onChange={e=> setPlanEnd(e.target.value)} disabled={editingLocked} title={editingLocked?lockTitle:''} />
                 </label>
                 <span className="text-xs text-gray-400">顶部日期仅用于筛选视图</span>
               </div>
@@ -2468,7 +2568,7 @@
       }
 
       const ViewBatch = (
-        <Section title="自动分配班次" right={editingLocked? <span className='text-rose-600 text-sm inline-flex items-center gap-1'><Icon name='lock'/>执行中：只读浏览</span>: null}>
+        <Section title="自动分配班次" right={editingLocked? <span className='text-rose-600 text-sm inline-flex items-center gap-1'><Icon name='lock'/>{lockTitle}</span>: null}>
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
             <div className="lg:col-span-1"><h3 className="font-medium mb-2">选择人员</h3><EmployeeChecklist/></div>
             <div className="lg:col-span-2 space-y-4"><MainRulePanel/><NightPanel/></div>
@@ -2623,9 +2723,13 @@
         setTimeout(()=> URL.revokeObjectURL(url), 200);
       };
 
-      const confirmAlbumPlan = ()=>{
-        if(editingLocked){ alert('执行中：请稍后再试'); return; }
+      const confirmAlbumPlan = async ()=>{
+        if(!ensureWritable()) return;
         if(!albumRange || albumDates.length===0){ alert('请先设置有效的月份范围并生成排班'); return; }
+        if(!snapshotRef.current){
+          globalErr('当前排班数据尚未加载完成，请稍后再试');
+          return;
+        }
         const snapshot = {};
         albumDates.forEach(day=>{
           const info = albumAssignments[day] || { white:'', mid:'' };
@@ -2646,15 +2750,47 @@
           diff: albumDiff,
           coverage: { ...albumCoverage }
         };
-        setAlbumHistory(prev=>{
-          const next = existingIdx>=0 ? prev.filter((_,idx)=> idx!==existingIdx) : prev.slice();
-          return [entry, ...next];
-        });
-        setAlbumAutoNote('排班已确认并保存，可在统计视图查看历史与分析。');
+        const historyList = existingIdx>=0 ? albumHistory.filter((_,idx)=> idx!==existingIdx) : albumHistory.slice();
+        const nextHistory = [entry, ...historyList];
+        const autoNote = '排班已确认并保存，可在统计视图查看历史与分析。';
+        setAlbumHistory(nextHistory);
+        setAlbumAutoNote(autoNote);
+        try{
+          const baseSnapshot = snapshotRef.current ? { ...snapshotRef.current } : null;
+          if(baseSnapshot){
+            baseSnapshot.albumHistory = nextHistory.map(item=> ({ ...item, assignments: { ...(item.assignments || {}) } }));
+            const assignmentClone = {};
+            Object.entries(albumAssignments || {}).forEach(([day, info])=>{
+              assignmentClone[day] = { ...(info || {}) };
+            });
+            baseSnapshot.albumAssignments = assignmentClone;
+            baseSnapshot.albumAutoNote = autoNote;
+          }
+          const payload = buildSavePayload({
+            operatorOverride: '自动保存',
+            noteOverride: baseSnapshot && baseSnapshot.note && baseSnapshot.note.trim() ? baseSnapshot.note : '自动保存'
+          }, baseSnapshot || undefined);
+          const res = await apiPost('/schedule/save', payload);
+          const returnedVersion = res && (res.version_id || res.versionId);
+          const nextVersion = returnedVersion || (baseSnapshot && baseSnapshot.versionId) || versionId || null;
+          applyServerState({ ...payload, versionId: nextVersion });
+          if(nextVersion){
+            lastLoadedVersionRef.current[team] = nextVersion;
+          }
+          showToast('专辑排班已确认并写入最新版', 'success');
+        }catch(e){
+          if(e && e.payload && e.payload.code===409){
+            showToast('检测到服务器有新版本，请先读取最新版本', 'error');
+            await loadVersions();
+            return;
+          }
+          if(e && e.code === 'UNAUTHORIZED') return;
+          globalErr(e.message);
+        }
       };
 
       const autoAssignAlbum = ()=>{
-        if(editingLocked){ alert('执行中：请稍后再试'); return; }
+        if(!ensureWritable()) return;
         if(albumCheckedList.length===0){ alert('请先在左侧勾选参与专辑审核的人员'); return; }
         if(albumDates.length===0){ alert('请先设置有效的月份范围，并确保与当前排班范围有交集'); return; }
         const diffLimitRaw = Number(albumMaxDiff);
@@ -2686,8 +2822,8 @@
               <div className="rounded-2xl border bg-gradient-to-br from-white via-white to-amber-50/60 p-4 space-y-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-amber-700"><Icon name="magic" className="w-4 h-4"/>自动排班参数</div>
                 <div className="grid grid-cols-1 gap-2 text-sm text-gray-600">
-                  <label className="flex items-center justify-between gap-2">开始月份<MonthInput className="border rounded px-2 py-1" value={albumRangeStartMonth} onChange={setAlbumRangeStartMonth} disabled={editingLocked} /></label>
-                  <label className="flex items-center justify-between gap-2">结束月份<MonthInput className="border rounded px-2 py-1" value={albumRangeEndMonth} onChange={setAlbumRangeEndMonth} disabled={editingLocked} /></label>
+                  <label className="flex items-center justify-between gap-2">开始月份<MonthInput className="border rounded px-2 py-1" value={albumRangeStartMonth} onChange={setAlbumRangeStartMonth} disabled={editingLocked} disabledTitle={lockTitle} /></label>
+                  <label className="flex items-center justify-between gap-2">结束月份<MonthInput className="border rounded px-2 py-1" value={albumRangeEndMonth} onChange={setAlbumRangeEndMonth} disabled={editingLocked} disabledTitle={lockTitle} /></label>
                   <label className="flex items-center justify-between gap-2">白班时长（小时）<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumWhiteHour}
                     onChange={e=> setAlbumWhiteHour(Number.parseFloat(e.target.value||'0')||0)} /></label>
                   <label className="flex items-center justify-between gap-2">中1时长（小时）<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumMidHour}
@@ -2695,7 +2831,7 @@
                   <label className="flex items-center justify-between gap-2">允许时长差值 ±<input type="number" step="0.01" min="0" className="border rounded px-2 py-1 w-24 text-right" value={albumMaxDiff}
                     onChange={e=> setAlbumMaxDiff(e.target.value===''?0:Number.parseFloat(e.target.value)||0)} /></label>
                 </div>
-                <PillBtn color="indigo" onClick={autoAssignAlbum} disabled={editingLocked || albumCheckedList.length===0 || albumDates.length===0} title={albumCheckedList.length===0? '请先勾选人员': albumDates.length===0? '请先设置有效月份范围': (editingLocked?'执行中：只读':'' )}>智能生成专辑审核排班</PillBtn>
+                <PillBtn color="indigo" onClick={autoAssignAlbum} disabled={editingLocked || albumCheckedList.length===0 || albumDates.length===0} title={albumCheckedList.length===0? '请先勾选人员': albumDates.length===0? '请先设置有效月份范围': (editingLocked?lockTitle:'' )}>智能生成专辑审核排班</PillBtn>
                 {albumAutoNote && <div className="text-xs text-indigo-600 bg-indigo-50/80 border border-indigo-100 rounded-xl px-3 py-2">{albumAutoNote}</div>}
                 <div className="text-xs text-gray-500">提示：参数调整后可重新生成；排班结果支持右侧表格内手动微调。</div>
               </div>
@@ -2710,7 +2846,7 @@
                     <span className="text-xs text-gray-400">{albumRange? `${albumRange.start} ~ ${albumRange.end}` : '请选择排班月份范围'}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <PillBtn color="emerald" onClick={confirmAlbumPlan} disabled={editingLocked || !albumRange || albumDates.length===0} title={editingLocked? '执行中：只读': (!albumRange || albumDates.length===0 ? '请先设置有效的月份范围' : '确认排班并写入历史')}>确认排班</PillBtn>
+                    <PillBtn color="emerald" onClick={confirmAlbumPlan} disabled={editingLocked || !albumRange || albumDates.length===0} title={editingLocked? lockTitle: (!albumRange || albumDates.length===0 ? '请先设置有效的月份范围' : '确认排班并写入历史')}>确认排班</PillBtn>
                     <PillBtn color="gray" onClick={exportAlbumPlan} disabled={albumDates.length===0} title={albumDates.length===0 ? '暂无可导出的排班数据' : '导出为 Excel'}>导出 Excel</PillBtn>
                   </div>
                 </div>
@@ -2945,7 +3081,7 @@
                   onCompositionStart={()=>{}}
                   onCompositionEnd={(e)=>{ setEmpInput(e.target.value); }}
                   onChange={e=>setEmpInput(e.target.value)} placeholder="张三\n李四" />
-                <PillBtn onClick={()=>{ empInput.split(/\n|,|\s+/).forEach(n=>{ const name=(n||'').trim(); if(name && !employees.includes(name)) setEmployees(prev=>[...prev, name]); }); setEmpInput(''); }} disabled={editingLocked} title={editingLocked?'执行中：只读':''}>添加</PillBtn>
+                  <PillBtn onClick={()=>{ empInput.split(/\n|,|\s+/).forEach(n=>{ const name=(n||'').trim(); if(name && !employees.includes(name)) setEmployees(prev=>[...prev, name]); }); setEmpInput(''); }} disabled={editingLocked} title={editingLocked?lockTitle:''}>添加</PillBtn>
               </div>
             </div>
             <div className="overflow-auto">
@@ -2961,13 +3097,13 @@
                         <div className="flex items-center gap-2">
                           {REST_PAIRS.map(p=> (
                             <label key={p} className={`px-2 py-1 rounded border cursor-pointer ${restPrefs[e]===p? 'bg-indigo-50 border-indigo-300 text-indigo-700':'hover:bg-gray-50'} ${editingLocked?'opacity-60 cursor-not-allowed':''}`}>
-                              <input type="radio" name={`rest-${e}`} disabled={editingLocked} className="mr-1" checked={restPrefs[e]===p} onChange={()=> setRestPrefs(r=> ({...r, [e]: sanitizeRestPairValue(p)}))} /> 休{p}
+                              <input type="radio" name={`rest-${e}`} disabled={editingLocked} title={editingLocked?lockTitle:''} className="mr-1" checked={restPrefs[e]===p} onChange={()=> setRestPrefs(r=> ({...r, [e]: sanitizeRestPairValue(p)}))} /> 休{p}
                             </label>
                           ))}
-                          <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-60 cursor-not-allowed':''}`} disabled={editingLocked} onClick={()=> setRestPrefs(r=>{ const x={...r}; delete x[e]; return x; })}>清除偏好</button>
+                          <button className={`px-2 py-1 rounded border ${editingLocked?'opacity-60 cursor-not-allowed':''}`} disabled={editingLocked} title={editingLocked?lockTitle:''} onClick={()=> setRestPrefs(r=>{ const x={...r}; delete x[e]; return x; })}>清除偏好</button>
                         </div>
                       </td>
-                      <td className="py-1"><button className={`text-red-600 ${editingLocked?'opacity-60 cursor-not-allowed':''}`} disabled={editingLocked} onClick={()=>{
+                        <td className="py-1"><button className={`text-red-600 ${editingLocked?'opacity-60 cursor-not-allowed':''}`} disabled={editingLocked} title={editingLocked?lockTitle:'删除人员'} onClick={()=>{
                         setEmployees(prev=> prev.filter(x=>x!==e));
                         setData(prev=>{ const next={...prev}; for(const d of Object.keys(next)){ if(next[d] && (e in (next[d]||{}))){ const r={...next[d]}; delete r[e]; next[d]=r; } } return next; });
                         setRestPrefs(r=>{ const x={...r}; delete x[e]; return x; });
@@ -2977,7 +3113,7 @@
                 </tbody>
               </table>
             </div>
-            <div className="mt-3"><PillBtn color="emerald" onClick={saveToServer} disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存人员与偏好到服务器</PillBtn></div>
+            <div className="mt-3"><PillBtn color="emerald" onClick={saveToServer} disabled={editingLocked} title={editingLocked?lockTitle:''}>保存人员与偏好到服务器</PillBtn></div>
           </div>
         </Section>
       );
@@ -3257,7 +3393,7 @@
         }, [employees, C, daysLen, adminDays, pMin, pMax, mixMax, orderBy, data, cur.s, cur.e]);
 
         return (
-          <Section title={`统计与对齐（${cur.s} ~ ${cur.e}）`} right={<div className="flex flex-wrap items-center gap-2 text-sm"><label>周期：</label><select className="border rounded px-2 py-1" value={statPeriod} onChange={e=>setStatPeriod(e.target.value)}><option value="y">年度</option><option value="q">季度</option><option value="m">月度</option><option value="r">当前选区</option></select><label className="ml-2">视图：</label><select className="border rounded px-2 py-1" value={statView} onChange={e=>setStatView(e.target.value)}><option value="daily">日期在岗分析</option><option value="person">人员班次统计</option><option value="rest">月度休息周期</option><option value="album">专辑审核</option></select>{statView==='person' && (<><label className="ml-2">排序：</label><select className="border rounded px-2 py-1" value={orderBy} onChange={e=>setOrderBy(e.target.value)}><option value="default">默认</option><option value="diff">差值</option><option value="longest">最长连班</option><option value="ratioDev">中/白偏差</option><option value="mix">混合比例</option></select></>)}{statView==='rest' && (<label className="ml-2 inline-flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" className="rounded" checked={showRestCounts} onChange={e=> setShowRestCounts(e.target.checked)} />显示月度明细</label>)}</div>}>
+          <Section title={`统计与对齐（${cur.s} ~ ${cur.e}）`} right={<div className="flex flex-wrap items-center gap-2 text-sm"><label>周期：</label><select className="border rounded px-2 py-1" value={statPeriod} onChange={e=>setStatPeriod(e.target.value)} disabled={isReadOnly} title={isReadOnly?READONLY_TOOLTIP:''}><option value="y">年度</option><option value="q">季度</option><option value="m">月度</option><option value="r">当前选区</option></select><label className="ml-2">视图：</label><select className="border rounded px-2 py-1" value={statView} onChange={e=>setStatView(e.target.value)}><option value="daily">日期在岗分析</option><option value="person">人员班次统计</option><option value="rest">月度休息周期</option><option value="album">专辑审核</option></select>{statView==='person' && (<><label className="ml-2">排序：</label><select className="border rounded px-2 py-1" value={orderBy} onChange={e=>setOrderBy(e.target.value)} disabled={isReadOnly} title={isReadOnly?READONLY_TOOLTIP:''}><option value="default">默认</option><option value="diff">差值</option><option value="longest">最长连班</option><option value="ratioDev">中/白偏差</option><option value="mix">混合比例</option></select></>)}{statView==='rest' && (<label className="ml-2 inline-flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" className="rounded" checked={showRestCounts} onChange={e=> setShowRestCounts(e.target.checked)} disabled={isReadOnly} title={isReadOnly?READONLY_TOOLTIP:''} />显示月度明细</label>)}</div>}>
             {statView==='person' && (
               <div className="mb-3 grid grid-cols-2 md:grid-cols-5 gap-2 text-sm">
                 <div className="rounded-xl border p-2 bg-gradient-to-br from-indigo-50 to-white"><div className="text-xs text-gray-500">平均白</div><div className="text-lg font-semibold text-indigo-700">{avg.白}</div></div>
@@ -3590,7 +3726,7 @@
       const ViewHistory = (
         <Section title={`历史版本（${teamDisplayName}）`} right={<div className="flex items-center gap-3">
           <label className="inline-flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" className="rounded" checked={showAutoSaves} onChange={e=> setShowAutoSaves(e.target.checked)} />显示自动保存</label>
-          <button onClick={loadVersions} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(editingLocked || versionsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={editingLocked || versionsLoading}>
+          <button onClick={loadVersions} className={`px-3 py-1.5 rounded-full text-sm text-white transition ${(editingLocked || versionsLoading)?'bg-gray-300 cursor-not-allowed':'bg-gray-800 hover:bg-gray-700'}`} disabled={editingLocked || versionsLoading} title={editingLocked?lockTitle:''}>
             {versionsLoading ? (<span className="flex items-center gap-2"><Spinner className="w-4 h-4 text-white" /><span>刷新中…</span></span>) : '刷新列表'}
           </button>
         </div>}>
@@ -3676,11 +3812,10 @@
                 onCompositionEnd={e=>{ e.target.isComposing = false; setNote(e.target.value); }}
                 onChange={allowIme(e=>setNote(e.target.value))} placeholder="例如：10月第一版"/>
             </div>
-            <div className="flex flex-wrap items-end gap-2">
-              <PillBtn onClick={saveToServer} color="emerald" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>保存新版本</PillBtn>
-              <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked} title={editingLocked?'执行中：只读':''}>服务器导出 Excel/CSV</PillBtn>
+              <div className="flex flex-wrap items-end gap-2">
+                <PillBtn onClick={exportExcel} color="sky" disabled={prog.running} title={prog.running?'执行中：请稍后':''}>服务器导出 Excel/CSV</PillBtn>
               <PillBtn onClick={downloadTemplate} color="gray">下载导入模板</PillBtn>
-              <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?'执行中：只读':(importing?'导入中…':'')}>
+                <PillBtn onClick={openImportPicker} color="indigo" disabled={editingLocked || importing} title={editingLocked?lockTitle:(importing?'导入中…':'')}>
                 {importing ? (<><Spinner className="w-4 h-4 text-white" /> 导入中…</>) : '导入 Excel' }
               </PillBtn>
               <input type="file" ref={importInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={onImportInputChange} />
@@ -3689,9 +3824,9 @@
           <div className="mt-2 text-xs text-gray-500">导入支持 XLSX / XLS / CSV 格式，将覆盖当前排班并自动更新周期。</div>
           <div className="mt-6">
             <h3 className="font-semibold mb-2">自动排班优化</h3>
-            <label className={`flex items-start gap-3 text-sm ${editingLocked?'opacity-60':''}`}>
-              <input type="checkbox" className="mt-1" checked={yearlyOptimize} disabled={editingLocked}
-                onChange={e=> setYearlyOptimize(e.target.checked)} />
+              <label className={`flex items-start gap-3 text-sm ${editingLocked?'opacity-60':''}`}>
+                <input type="checkbox" className="mt-1" checked={yearlyOptimize} disabled={editingLocked} title={editingLocked?lockTitle:''}
+                  onChange={e=> setYearlyOptimize(e.target.checked)} />
               <span>
                 <span className="font-medium text-gray-700">按当年累计班次优化</span>
                 <span className="block text-xs text-gray-500 mt-1">开启后，自动排班会参考 {scheduleYearLabel} 年 1 月至排班开始日前的历史安排，延续休息日并均衡全年班次占比。</span>
@@ -3701,16 +3836,16 @@
           <div className="mt-6">
             <h3 className="font-semibold mb-2">班次颜色（同步保存到浏览器）</h3>
             <div className="flex flex-wrap gap-4 items-center text-sm">
-              {['白','中1','中2','夜','休'].map(s=> (
-                <label key={s} className={`flex items-center gap-2 ${editingLocked?'opacity-60':''}`}><span className="w-10 text-right">{s}</span><input type="color" disabled={editingLocked} value={shiftColors[s]||'#ffffff'} onChange={e=> setShiftColors(p=>({ ...p, [s]: e.target.value }))} /></label>
-              ))}
-              <button className={`px-3 py-1.5 rounded ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-100 hover:bg-gray-200'}`} disabled={editingLocked} onClick={()=> setShiftColors({'白':'#eef2ff','中1':'#e0f2fe','中2':'#cffafe','夜':'#fee2e2','休':'#f3f4f6'})}>恢复默认</button>
+                {['白','中1','中2','夜','休'].map(s=> (
+                  <label key={s} className={`flex items-center gap-2 ${editingLocked?'opacity-60':''}`}><span className="w-10 text-right">{s}</span><input type="color" disabled={editingLocked} title={editingLocked?lockTitle:''} value={shiftColors[s]||'#ffffff'} onChange={e=> setShiftColors(p=>({ ...p, [s]: e.target.value }))} /></label>
+                ))}
+                <button className={`px-3 py-1.5 rounded ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-100 hover:bg-gray-200'}`} disabled={editingLocked} title={editingLocked?lockTitle:''} onClick={()=> setShiftColors({'白':'#eef2ff','中1':'#e0f2fe','中2':'#cffafe','夜':'#fee2e2','休':'#f3f4f6'})}>恢复默认</button>
             </div>
           </div>
           <div className="mt-6 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold">在岗人数提醒颜色</h3>
-              <button className={`text-xs px-2 py-1 rounded ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-100 hover:bg-gray-200'}`} disabled={editingLocked} onClick={()=> setStaffingAlerts(normalizeStaffingAlerts())}>恢复默认</button>
+                <button className={`text-xs px-2 py-1 rounded ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-100 hover:bg-gray-200'}`} disabled={editingLocked} title={editingLocked?lockTitle:''} onClick={()=> setStaffingAlerts(normalizeStaffingAlerts())}>恢复默认</button>
             </div>
             <div className="text-xs text-gray-500">可自定义排班表中「在岗 / 白 / 中1」统计的颜色提示。例如当中1 ≤ 3 时给出醒目颜色。</div>
             <div className="space-y-3">
@@ -3725,17 +3860,17 @@
                     <div className="font-medium text-gray-700">{item.label}</div>
                     <div className="grid grid-cols-1 md:grid-cols-[auto_auto_auto_auto] gap-2 items-center">
                       <span className="text-xs text-gray-500">≤</span>
-                      <input type="number" className="w-20 border rounded px-2 py-1" value={conf?.threshold ?? 0} disabled={editingLocked} onChange={e=> setStaffingAlerts(prev=>{
+                        <input type="number" className="w-20 border rounded px-2 py-1" value={conf?.threshold ?? 0} disabled={editingLocked} title={editingLocked?lockTitle:''} onChange={e=> setStaffingAlerts(prev=>{
                         const next = normalizeStaffingAlerts(prev);
                         next[item.key].threshold = Number(e.target.value || 0);
                         return next;
                       })} />
-                      <input type="color" className="w-16" disabled={editingLocked} value={conf?.lowColor || '#ffffff'} onChange={e=> setStaffingAlerts(prev=>{
+                        <input type="color" className="w-16" disabled={editingLocked} title={editingLocked?lockTitle:''} value={conf?.lowColor || '#ffffff'} onChange={e=> setStaffingAlerts(prev=>{
                         const next = normalizeStaffingAlerts(prev);
                         next[item.key].lowColor = e.target.value;
                         return next;
                       })} />
-                      <div className="flex items-center gap-2 text-xs text-gray-500"><span>大于阈值</span><input type="color" className="w-16" disabled={editingLocked} value={conf?.highColor || '#ffffff'} onChange={e=> setStaffingAlerts(prev=>{
+                        <div className="flex items-center gap-2 text-xs text-gray-500"><span>大于阈值</span><input type="color" className="w-16" disabled={editingLocked} title={editingLocked?lockTitle:''} value={conf?.highColor || '#ffffff'} onChange={e=> setStaffingAlerts(prev=>{
                         const next = normalizeStaffingAlerts(prev);
                         next[item.key].highColor = e.target.value;
                         return next;
@@ -3752,7 +3887,7 @@
       const extraAccounts = orgConfig.accounts.filter(acc=> acc.username!=='admin');
       const ViewRoles = canManageRoles ? (
         <>
-          <Section title="团队管理" right={<PillBtn onClick={addTeam} color="sky" disabled={editingLocked}>新增团队</PillBtn>}>
+          <Section title="团队管理" right={<PillBtn onClick={addTeam} color="sky" disabled={editingLocked} title={editingLocked?lockTitle:''}>新增团队</PillBtn>}>
             {teamsList.length===0 ? (
               <p className="text-sm text-gray-500">暂未创建团队，请点击右上角按钮新增。</p>
             ) : (
@@ -3762,29 +3897,29 @@
                     <div className="flex flex-wrap items-end gap-3 text-sm">
                       <label className="flex flex-col text-sm text-gray-600">
                         <span className="mb-1">团队名称</span>
-                        <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={t.name}
-                          onCompositionStart={e=>{ e.target.isComposing = true; }}
-                          onCompositionEnd={e=>{ e.target.isComposing = false; updateTeamField(t.id, 'name', e.target.value); }}
-                          onChange={allowIme(e=> updateTeamField(t.id, 'name', e.target.value))} disabled={editingLocked} />
+                          <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={t.name}
+                            onCompositionStart={e=>{ e.target.isComposing = true; }}
+                            onCompositionEnd={e=>{ e.target.isComposing = false; updateTeamField(t.id, 'name', e.target.value); }}
+                            onChange={allowIme(e=> updateTeamField(t.id, 'name', e.target.value))} disabled={editingLocked} title={editingLocked?lockTitle:''} />
                       </label>
                       <div className="text-xs text-gray-500">ID：{t.id}</div>
                       <label className="flex-1 flex flex-col text-sm text-gray-600 min-w-[200px]">
                         <span className="mb-1">备注</span>
-                        <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={t.remark||''}
-                          onCompositionStart={e=>{ e.target.isComposing = true; }}
-                          onCompositionEnd={e=>{ e.target.isComposing = false; updateTeamField(t.id, 'remark', e.target.value); }}
-                          onChange={allowIme(e=> updateTeamField(t.id, 'remark', e.target.value))} disabled={editingLocked} />
+                          <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={t.remark||''}
+                            onCompositionStart={e=>{ e.target.isComposing = true; }}
+                            onCompositionEnd={e=>{ e.target.isComposing = false; updateTeamField(t.id, 'remark', e.target.value); }}
+                            onChange={allowIme(e=> updateTeamField(t.id, 'remark', e.target.value))} disabled={editingLocked} title={editingLocked?lockTitle:''} />
                       </label>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-4 text-sm">
-                      <label className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60':''}`}>
-                        <input type="checkbox" checked={t.features?.albumScheduler !== false} disabled={editingLocked}
-                          onChange={e=> updateTeamFeature(t.id, 'albumScheduler', e.target.checked)} /> 启用专辑审核自动排班
+                        <label className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60':''}`}>
+                          <input type="checkbox" checked={t.features?.albumScheduler !== false} disabled={editingLocked} title={editingLocked?lockTitle:''}
+                            onChange={e=> updateTeamFeature(t.id, 'albumScheduler', e.target.checked)} /> 启用专辑审核自动排班
                       </label>
                     </div>
                     {teamsList.length>1 && (
                       <div className="mt-3 text-right">
-                        <button onClick={()=> removeTeam(t.id)} className={`text-sm text-rose-600 ${editingLocked?'opacity-50 cursor-not-allowed':'hover:underline'}`} disabled={editingLocked}>删除团队</button>
+                        <button onClick={()=> removeTeam(t.id)} className={`text-sm text-rose-600 ${editingLocked?'opacity-50 cursor-not-allowed':'hover:underline'}`} disabled={editingLocked} title={editingLocked?lockTitle:'删除团队'}>删除团队</button>
                       </div>
                     )}
                   </div>
@@ -3792,7 +3927,7 @@
               </div>
             )}
           </Section>
-          <Section title="账号与权限" right={<PillBtn onClick={addAccount} color="emerald" disabled={editingLocked}>新增账号</PillBtn>}>
+          <Section title="账号与权限" right={<PillBtn onClick={addAccount} color="emerald" disabled={editingLocked} title={editingLocked?lockTitle:''}>新增账号</PillBtn>}>
             <div className="space-y-4 text-sm">
               <div className="rounded-xl border border-dashed border-indigo-200 bg-indigo-50/40 p-4 text-xs text-indigo-700">
                 超级管理员 <span className="font-medium">admin</span> 拥有全部权限，可在此创建访客或管理者账号，并分配可访问的团队与菜单权限。
@@ -3811,19 +3946,19 @@
                           <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.username}
                             onCompositionStart={e=>{ e.target.isComposing = true; }}
                             onCompositionEnd={e=>{ e.target.isComposing = false; setAccountUsername(acc.username, e.target.value); }}
-                            onChange={allowIme(e=> setAccountUsername(acc.username, e.target.value))} disabled={editingLocked} />
+                            onChange={allowIme(e=> setAccountUsername(acc.username, e.target.value))} disabled={editingLocked} title={editingLocked?lockTitle:''} />
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">显示名称</span>
                           <input className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.displayName||''}
                             onCompositionStart={e=>{ e.target.isComposing = true; }}
                             onCompositionEnd={e=>{ e.target.isComposing = false; setAccountDisplayName(acc.username, e.target.value); }}
-                            onChange={allowIme(e=> setAccountDisplayName(acc.username, e.target.value))} disabled={editingLocked} />
+                            onChange={allowIme(e=> setAccountDisplayName(acc.username, e.target.value))} disabled={editingLocked} title={editingLocked?lockTitle:''} />
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">角色</span>
                           <select className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.role||'guest'}
-                            onChange={e=> setAccountRole(acc.username, e.target.value)} disabled={editingLocked}>
+                            onChange={e=> setAccountRole(acc.username, e.target.value)} disabled={editingLocked} title={editingLocked?lockTitle:''}>
                             <option value="guest">访客（只读）</option>
                             <option value="manager">管理者</option>
                           </select>
@@ -3833,21 +3968,21 @@
                         <div>
                           <label className="block text-xs text-gray-500 mb-1">登录密码</label>
                           <input type="password" className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={passwordDraft}
-                            onChange={e=> updateAccountPasswordDraft(acc.username, e.target.value)} placeholder="留空表示清空" disabled={editingLocked} />
+                            onChange={e=> updateAccountPasswordDraft(acc.username, e.target.value)} placeholder="留空表示清空" disabled={editingLocked} title={editingLocked?lockTitle:''} />
                         </div>
-                        <PillBtn onClick={()=> setAccountPassword(acc.username)} color="indigo" disabled={editingLocked}>更新密码</PillBtn>
-                        <button onClick={()=> removeAccount(acc.username)} className={`text-sm text-rose-600 ${editingLocked?'opacity-50 cursor-not-allowed':'hover:underline'}`} disabled={editingLocked}>删除账号</button>
+                        <PillBtn onClick={()=> setAccountPassword(acc.username)} color="indigo" disabled={editingLocked} title={editingLocked?lockTitle:''}>更新密码</PillBtn>
+                        <button onClick={()=> removeAccount(acc.username)} className={`text-sm text-rose-600 ${editingLocked?'opacity-50 cursor-not-allowed':'hover:underline'}`} disabled={editingLocked} title={editingLocked?lockTitle:'删除账号'}>删除账号</button>
                       </div>
                       <div>
                         <div className="text-xs text-gray-500 mb-1">可切换团队</div>
                         <div className="flex flex-wrap gap-3">
                           <label className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60 cursor-not-allowed':'hover:text-indigo-600'}`}>
-                            <input type="checkbox" checked={hasAll} disabled={editingLocked}
+                            <input type="checkbox" checked={hasAll} disabled={editingLocked} title={editingLocked?lockTitle:''}
                               onChange={e=> setAccountAllTeams(acc.username, e.target.checked)} /> 全部团队
                           </label>
                           {teamsList.map(teamItem=> (
                             <label key={teamItem.id} className={`inline-flex items-center gap-2 ${editingLocked?'opacity-60 cursor-not-allowed':'hover:text-indigo-600'}`}>
-                              <input type="checkbox" disabled={editingLocked} checked={hasAll || (acc.teamAccess||[]).includes(teamItem.id)}
+                              <input type="checkbox" disabled={editingLocked} title={editingLocked?lockTitle:''} checked={hasAll || (acc.teamAccess||[]).includes(teamItem.id)}
                                 onChange={e=> setAccountTeamAccess(acc.username, teamItem.id, e.target.checked)} /> {teamItem.name}
                             </label>
                           ))}
@@ -3864,11 +3999,11 @@
                               <div key={key} className="flex items-center gap-2 bg-gray-50 rounded-xl px-3 py-2">
                                 <span className="flex-1 text-sm text-gray-700">{menuLabels[key]}</span>
                                 <label className={`inline-flex items-center gap-1 text-xs ${editingLocked?'opacity-60':''}`}>
-                                  <input type="checkbox" checked={visible} disabled={editingLocked}
+                                  <input type="checkbox" checked={visible} disabled={editingLocked} title={editingLocked?lockTitle:''}
                                     onChange={e=> updateAccountMenu(acc.username, key, 'visible', e.target.checked)} /> 可见
                                 </label>
                                 <label className={`inline-flex items-center gap-1 text-xs ${editingLocked||!visible?'opacity-60':''}`}>
-                                  <input type="checkbox" checked={editable && visible} disabled={editingLocked || !visible}
+                                  <input type="checkbox" checked={editable && visible} disabled={editingLocked || !visible} title={editingLocked?lockTitle:''}
                                     onChange={e=> updateAccountMenu(acc.username, key, 'editable', e.target.checked)} /> 可编辑
                                 </label>
                               </div>
@@ -3891,21 +4026,35 @@
 
       const Topbar = (
         <div className="sticky top-0 z-30 bg-gradient-to-b from-white/90 to-white/60 backdrop-blur border-b">
-          <div className="layout-shell py-3 flex items-center gap-3">
-            <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
-            <div className="flex-1"></div>
-            <div className="flex lg:hidden items-center gap-2 text-sm mr-2">
-              <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
+          <div className="layout-shell py-3">
+            <div className="flex items-center gap-3">
+              <h1 className="text-xl font-bold text-indigo-600">排班助手（测试版）</h1>
+              <div className="flex-1"></div>
+              <div className="flex lg:hidden items-center gap-2 text-sm mr-2">
+                <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running || isReadOnly} disabledTitle={lockTitle} canManage={canManageRoles} onManage={()=> setTab('roles')} />
+              </div>
+              <div className="hidden lg:flex items-center gap-2 text-sm">
+                <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running || isReadOnly} disabledTitle={lockTitle} canManage={canManageRoles} onManage={()=> setTab('roles')} />
+                <input type="date" aria-label="筛选开始日期" className="border rounded px-3 py-1.5" value={viewStart} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewStart(e.target.value); }} />
+                <span className="text-gray-400">—</span>
+                <input type="date" aria-label="筛选结束日期" className="border rounded px-3 py-1.5" value={viewEnd} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewEnd(e.target.value); }} />
+              </div>
+              <div className="flex items-center gap-3">
+                {user && <span className="text-sm text-gray-600 font-medium">您好，{userDisplayName}</span>}
+                <PillBtn onClick={saveToServer} color="emerald" disabled={editingLocked} title={editingLocked ? lockTitle : '保存当前排班为新版本'}>保存新版本</PillBtn>
+                <PillBtn onClick={exportExcel} color="sky" disabled={prog.running} title={prog.running ? '执行中：请稍后' : ''}>导出</PillBtn>
+                {user ? (
+                  <button onClick={doLogout} className={`px-3 py-1.5 rounded-full text-sm ${prog.running?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={prog.running}>退出</button>
+                ) : (
+                  <span className="text-xs text-gray-500">未登录</span>
+                )}
+              </div>
             </div>
-            <div className="hidden lg:flex items-center gap-2 text-sm">
-              <TeamSwitcher teams={accessibleTeams} value={team} onChange={setTeam} disabled={prog.running} canManage={canManageRoles} onManage={()=> setTab('roles')} />
-              <input type="date" className="border rounded px-3 py-1.5" value={viewStart} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewStart(e.target.value); }} />
+            <div className="mt-3 flex items-center gap-2 text-sm lg:hidden">
+              <span className="text-gray-500 text-xs">筛选范围</span>
+              <input type="date" aria-label="筛选开始日期" className="border rounded px-3 py-1.5 flex-1" value={viewStart} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewStart(e.target.value); }} />
               <span className="text-gray-400">—</span>
-              <input type="date" className="border rounded px-3 py-1.5" value={viewEnd} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewEnd(e.target.value); }} />
-            </div>
-            <div className="flex items-center gap-2">
-              <PillBtn onClick={exportExcel} color="sky" disabled={editingLocked}>导出</PillBtn>
-              {user ? (<button onClick={async()=>{ await apiPost('/logout',{}).catch(()=>{}); setUser(null); }} className={`px-3 py-1.5 rounded-full text-sm ${editingLocked?'bg-gray-200 cursor-not-allowed':'bg-gray-200 hover:bg-gray-300'}`} disabled={editingLocked}>退出</button>) : (<span className="text-xs text-gray-500">未登录</span>)}
+              <input type="date" aria-label="筛选结束日期" className="border rounded px-3 py-1.5 flex-1" value={viewEnd} onChange={e=> { viewManuallyAdjustedRef.current = true; setViewEnd(e.target.value); }} />
             </div>
           </div>
           {Object.keys(nightIssues).length>0 && (
@@ -3919,6 +4068,17 @@
       return (
         <div className="min-h-screen">
           {Topbar}
+          {newVersionBanner && (
+            <div className="fixed top-20 right-6 z-40 max-w-sm">
+              <div className="bg-amber-50 border border-amber-200 text-amber-700 rounded-2xl px-4 py-3 shadow-lg space-y-3">
+                <div className="text-sm font-medium leading-relaxed">检测到新版本数据。如正在调整播单专辑排班，请先点击确认排班后再读取。</div>
+                <div className="flex justify-end gap-2 text-sm">
+                  <button type="button" className="px-3 py-1.5 rounded-full border border-amber-200 text-amber-600 hover:bg-amber-100" onClick={()=> setNewVersionBanner(null)}>稍后</button>
+                  <button type="button" className="px-3 py-1.5 rounded-full bg-amber-500 text-white hover:bg-amber-600" onClick={async()=>{ if(newVersionBanner?.id) await loadVersionById(newVersionBanner.id); }}>读取</button>
+                </div>
+              </div>
+            </div>
+          )}
           <div className="layout-shell py-6">
             <SideDock tab={tab} setTab={setTab} menuPerms={menuPerms}/>
             <main className="animate-fade-in">{content}<footer className="text-center text-xs text-gray-400 py-6">© 排班助手（测试版） v2.3</footer></main>
@@ -3977,7 +4137,7 @@
             </div>
           )}
 
-          {!user && <LoginModal onSuccess={setUser} accounts={orgConfig.accounts} />}
+          {!user && authChecked && <LoginModal onSuccess={setUser} accounts={orgConfig.accounts} />}
         </div>
       );
     }
