@@ -9,6 +9,19 @@ ini_set('display_errors', '0');
 error_reporting(E_ALL);
 date_default_timezone_set('Asia/Shanghai');
 
+$httpsActive = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off')
+  || (isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] === 443);
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: SAMEORIGIN');
+if ($httpsActive) {
+  header('Strict-Transport-Security: max-age=31536000; includeSubDomains; preload');
+  header('Content-Security-Policy: upgrade-insecure-requests');
+  header('Cross-Origin-Opener-Policy: same-origin');
+  header('Cross-Origin-Resource-Policy: same-origin');
+}
+
 if (!defined('ADMIN_LOGIN_USERNAME')) {
   define('ADMIN_LOGIN_USERNAME', 'admin');
 }
