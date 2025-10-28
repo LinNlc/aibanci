@@ -3,6 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin />
+  <link rel="preconnect" href="https://unpkg.com" crossorigin />
+  <link rel="dns-prefetch" href="https://cdn.tailwindcss.com" />
+  <link rel="dns-prefetch" href="https://unpkg.com" />
+  <link rel="preload" href="static/js/scheduler-algorithms.js" as="script" />
   <title>排班助手（测试版）</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
@@ -236,6 +241,59 @@
 
     const REST_PAIRS = ['12','23','34','56','71'];
     const MENU_KEYS = ['grid','batch','album','users','stats','history','settings','roles'];
+    const ROLE_PRESETS = {
+      viewer: {
+        label: '协作访客（只读）',
+        description: '可查看排班、统计及历史版本，禁止更改数据。',
+        menus: {
+          grid: { visible: true, editable: false },
+          batch: { visible: false, editable: false },
+          album: { visible: false, editable: false },
+          users: { visible: false, editable: false },
+          stats: { visible: true, editable: false },
+          history: { visible: true, editable: false },
+          settings: { visible: false, editable: false },
+          roles: { visible: false, editable: false }
+        }
+      },
+      editor: {
+        label: '协作编辑',
+        description: '可编辑排班、自动排班与专辑审核，查看统计与历史。',
+        menus: {
+          grid: { visible: true, editable: true },
+          batch: { visible: true, editable: true },
+          album: { visible: true, editable: true },
+          users: { visible: false, editable: false },
+          stats: { visible: true, editable: true },
+          history: { visible: true, editable: false },
+          settings: { visible: true, editable: false },
+          roles: { visible: false, editable: false }
+        }
+      },
+      manager: {
+        label: '排班管理员',
+        description: '可配置员工、班表与统计，除角色设置外的菜单均可编辑。',
+        menus: {
+          grid: { visible: true, editable: true },
+          batch: { visible: true, editable: true },
+          album: { visible: true, editable: true },
+          users: { visible: true, editable: true },
+          stats: { visible: true, editable: true },
+          history: { visible: true, editable: true },
+          settings: { visible: true, editable: true },
+          roles: { visible: false, editable: false }
+        }
+      }
+    };
+    const DEFAULT_ROLE = 'viewer';
+    function normalizeRoleName(role){
+      if(role === 'super') return 'super';
+      if(role === 'manager') return 'manager';
+      if(role === 'editor') return 'editor';
+      if(role === 'viewer') return 'viewer';
+      if(role === 'guest') return 'viewer';
+      return DEFAULT_ROLE;
+    }
     const defaultShiftColors = { '白':'#eef2ff','中1':'#e0f2fe','中2':'#cffafe','夜':'#fee2e2','休':'#f3f4f6' };
     const defaultStaffingAlerts = {
       total: { threshold: 0, lowColor: '#fee2e2', highColor: '#dcfce7' },
@@ -377,7 +435,30 @@
           if(typeof conf.editable === 'boolean') base[key].editable = conf.editable;
         }
       });
+      MENU_KEYS.forEach(key=>{ if(!base[key].visible) base[key].editable = false; });
       return base;
+    }
+    function menusForRole(role){
+      const normalized = normalizeRoleName(role);
+      const base = defaultMenuPerms();
+      const preset = ROLE_PRESETS[normalized];
+      if(preset && preset.menus){
+        Object.entries(preset.menus).forEach(([key, overrides])=>{
+          if(!base[key] || !overrides) return;
+          base[key] = { ...base[key], ...overrides };
+        });
+      }
+      MENU_KEYS.forEach(key=>{ if(!base[key].visible) base[key].editable = false; });
+      return base;
+    }
+    function menusMatchRole(menus, role){
+      if(!menus) return false;
+      const target = menusForRole(role);
+      return MENU_KEYS.every(key=>{
+        const a = menus[key] || {};
+        const b = target[key] || {};
+        return !!a.visible === !!b.visible && !!a.editable === !!b.editable;
+      });
     }
     function ensureUniqueId(base, existing){
       let id = base;
@@ -438,7 +519,14 @@
           if(!acc || typeof acc.username !== 'string') return;
           const username = acc.username.trim();
           if(!username || username === 'admin') return;
-          const menus = normalizeMenuPerms(acc.menus);
+          const normalizedRole = normalizeRoleName(acc.role);
+          const effectiveRole = normalizedRole === 'super' ? 'manager' : normalizedRole;
+          let menus;
+          if(acc.menus && typeof acc.menus === 'object' && Object.keys(acc.menus).length){
+            menus = normalizeMenuPerms(acc.menus);
+          } else {
+            menus = menusForRole(effectiveRole);
+          }
           let access = ['*'];
           if(Array.isArray(acc.teamAccess)){
             const cleaned = acc.teamAccess.filter(id=> id==='*' || teamIds.has(id));
@@ -454,7 +542,7 @@
           accounts.push({
             username,
             displayName: typeof acc.displayName === 'string' ? acc.displayName : '',
-            role: acc.role === 'manager' ? 'manager' : 'guest',
+            role: effectiveRole,
             passwordHash: typeof acc.passwordHash === 'string' ? acc.passwordHash : '',
             menus,
             teamAccess: access
@@ -1337,8 +1425,8 @@
           while(existing.has(candidate) || candidate==='admin'){
             candidate = `${base}${idx++}`;
           }
-          const menus = defaultMenuPerms({ roles:{ visible:false, editable:false } });
-          const nextAcc = { username:candidate, displayName:'', role:'guest', passwordHash:'', menus, teamAccess:['*'] };
+          const menus = menusForRole(DEFAULT_ROLE);
+          const nextAcc = { username:candidate, displayName:'', role:DEFAULT_ROLE, passwordHash:'', menus, teamAccess:['*'] };
           return { ...prev, accounts: [...prev.accounts, nextAcc] };
         });
       };
@@ -1376,7 +1464,20 @@
         if(user && user.username === username){ setUser(prev=> prev? { ...prev, username: trimmed } : prev); }
       };
       const setAccountDisplayName = (username, value)=> updateAccountConfig(username, acc=> ({ ...acc, displayName: value }));
-      const setAccountRole = (username, role)=> updateAccountConfig(username, acc=> ({ ...acc, role }));
+      const setAccountRole = (username, role)=>{
+        const normalized = normalizeRoleName(role);
+        updateAccountConfig(username, acc=> ({
+          ...acc,
+          role: normalized,
+          menus: menusForRole(normalized)
+        }));
+      };
+      const resetAccountMenusToRole = (username)=>{
+        updateAccountConfig(username, acc=>{
+          const normalized = normalizeRoleName(acc.role || DEFAULT_ROLE);
+          return { ...acc, menus: menusForRole(normalized) };
+        });
+      };
       const setAccountPassword = (username)=>{
         const raw = accountPasswordDrafts[username] || '';
         updateAccountConfig(username, acc=> ({ ...acc, passwordHash: hashPassword(raw) }));
@@ -2023,6 +2124,21 @@
         return allDateKeys.filter(day=> (!s || day >= s) && (!e || day <= e));
       }, [planStart, planEnd, allDateKeys]);
       const activeCellRef = useRef(null);
+      const gridWrapRef = useRef(null);
+      const preserveGridScroll = useCallback((cb)=>{
+        const el = gridWrapRef.current;
+        if(!el){ cb(); return; }
+        const st = el.scrollTop;
+        const sl = el.scrollLeft;
+        cb();
+        requestAnimationFrame(()=>{
+          const node = gridWrapRef.current;
+          if(node){
+            node.scrollTop = st;
+            node.scrollLeft = sl;
+          }
+        });
+      }, []);
       const setCellByIndex = useCallback((dIndex, eIndex, value)=>{
         const d = dateList[dIndex];
         const emp = employees[eIndex];
@@ -2075,8 +2191,8 @@
             top = Math.max(margin, viewportHeight - pickerHeight - margin);
           }
         }
-        setPicker({ open:true, di, ei, x:left, y:top, placement });
-      }, [prog.running, isReadOnly, showToast]);
+        preserveGridScroll(()=> setPicker({ open:true, di, ei, x:left, y:top, placement }));
+      }, [prog.running, isReadOnly, showToast, preserveGridScroll]);
       const onKeyDownCell = useCallback((e, di, ei)=>{
         if(e.isComposing) return;
         if(e.altKey && (e.key==='ArrowDown' || e.key==='Enter')){
@@ -2170,7 +2286,7 @@
                       onCompositionEnd={(ev)=>{ ev.target.isComposing = false; setCellByIndex(di, ei, ev.currentTarget.value); }}
                       onChange={ev=> setCellByIndex(di, ei, ev.target.value)}
                       onDoubleClick={(ev)=>{ if(prog.running){ alert('执行中：请稍后再试'); return; } if(isReadOnly){ showToast(READONLY_TOOLTIP, 'error'); return; } openPickerAt(di, ei, ev.currentTarget); }} placeholder="白/中1/中2/夜/休 或留空" />
-                    <button className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title={editingLocked?lockTitle:'选择班次'}
+                    <button type="button" className="cell-toggle" disabled={editingLocked} aria-label="选择班次" title={editingLocked?lockTitle:'选择班次'}
                       onClick={(ev)=>{ ev.preventDefault(); ev.stopPropagation(); openPickerAt(di, ei); }}>
                       <span className="sr-only">打开班次选择器</span>
                     </button>
@@ -2302,7 +2418,7 @@
             <div className="text-sm text-gray-500">请先在「员工管理」中添加员工。</div>
           ) : (
             <>
-          <div className="grid-wrap border rounded-xl shadow-inner" onPaste={(e)=>{ if(isReadOnly){ showToast(READONLY_TOOLTIP, 'error'); return; } if(prog.running) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}>
+          <div ref={gridWrapRef} className="grid-wrap border rounded-xl shadow-inner" onPaste={(e)=>{ if(isReadOnly){ showToast(READONLY_TOOLTIP, 'error'); return; } if(prog.running) return; const cur = activeCellRef.current; if(!cur) return; const text = e.clipboardData.getData('text'); if(!text) return; e.preventDefault(); const rows = text.replace(/\r/g,'').split('\n').filter(x=>x.length>0).map(r=>r.split(/\t|,/)); const baseI = cur.eIndex; const baseD = cur.dIndex; setData(prev=>{ const next = { ...prev }; for(let r=0; r<rows.length; r++){ const d = dateList[baseD + r]; if(!d) break; const row = { ...(next[d]||{}) }; for(let c=0; c<rows[r].length; c++){ const emp = employees[baseI + c]; if(!emp) break; row[emp] = rows[r][c]; } next[d] = row; } return next; }); }}>
                 <table className="min-w-max text-sm w-full">
                   <thead>
                     <tr className="bg-gray-50">
@@ -3938,6 +4054,10 @@
                 extraAccounts.map(acc=>{
                   const hasAll = acc.teamAccess && acc.teamAccess.includes('*');
                   const passwordDraft = accountPasswordDrafts[acc.username] || '';
+                  const normalizedRole = normalizeRoleName(acc.role || DEFAULT_ROLE);
+                  const roleInfo = ROLE_PRESETS[normalizedRole] || null;
+                  const roleOptions = Object.entries(ROLE_PRESETS);
+                  const menusAligned = menusMatchRole(acc.menus, normalizedRole);
                   return (
                     <div key={acc.username} className="border rounded-2xl p-4 bg-white shadow-sm space-y-3">
                       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -3957,12 +4077,19 @@
                         </label>
                         <label className="flex flex-col text-gray-600 text-sm">
                           <span className="mb-1">角色</span>
-                          <select className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={acc.role||'guest'}
+                          <select className={`border rounded px-3 py-1.5 ${editingLocked?'bg-gray-100':''}`} value={normalizedRole}
                             onChange={e=> setAccountRole(acc.username, e.target.value)} disabled={editingLocked} title={editingLocked?lockTitle:''}>
-                            <option value="guest">访客（只读）</option>
-                            <option value="manager">管理者</option>
+                            {roleOptions.map(([value, info])=> (
+                              <option key={value} value={value}>{info.label}</option>
+                            ))}
                           </select>
                         </label>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                        <span>{roleInfo ? roleInfo.description : '根据下方菜单复选框自定义权限。'}</span>
+                        {!menusAligned && <span className="text-rose-500">（菜单权限已自定义）</span>}
+                        <button type="button" className={`text-indigo-600 hover:underline ${editingLocked?'opacity-40 cursor-not-allowed':''}`}
+                          onClick={()=> resetAccountMenusToRole(acc.username)} disabled={editingLocked}>恢复默认权限</button>
                       </div>
                       <div className="flex flex-wrap items-end gap-2">
                         <div>
@@ -4120,6 +4247,7 @@
                   }
                   return (
                     <button
+                      type="button"
                       key={s}
                       className="w-full text-left px-3 py-2 rounded hover:bg-gray-100"
                       onClick={()=>{ setCellByIndex(picker.di, picker.ei, s); setPicker(p=>({...p, open:false})); }}
@@ -4132,7 +4260,7 @@
                   );
                 })}
                 <div className="h-px bg-gray-100 my-1"></div>
-                <button className="w-full text-left px-3 py-2 rounded hover:bg-gray-100" onClick={()=>{ setCellByIndex(picker.di, picker.ei, ''); setPicker(p=>({...p, open:false})); }}>清空</button>
+                <button type="button" className="w-full text-left px-3 py-2 rounded hover:bg-gray-100" onClick={()=>{ setCellByIndex(picker.di, picker.ei, ''); setPicker(p=>({...p, open:false})); }}>清空</button>
               </div>
             </div>
           )}
