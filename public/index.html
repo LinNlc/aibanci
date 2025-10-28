@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>协同排班系统</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/modern-normalize/modern-normalize.css">
+    <style>
+        body {
+            font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+            margin: 0;
+            background: #f5f6fa;
+            color: #1f2329;
+        }
+        header {
+            background: #1f6feb;
+            color: #fff;
+            padding: 16px 24px;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 20px;
+        }
+        .container {
+            padding: 24px;
+        }
+        .toolbar {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        label span {
+            display: inline-block;
+            min-width: 64px;
+        }
+        input, select, button {
+            font-size: 14px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #fff;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+        thead th {
+            background: #eef2ff;
+            padding: 12px;
+        }
+        tbody td, tbody th {
+            border: 1px solid #e5e7eb;
+            padding: 8px;
+            position: relative;
+        }
+        tbody th {
+            width: 120px;
+            background: #f9fafb;
+        }
+        .cell-value {
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .cell-meta {
+            font-size: 12px;
+            color: #6b7280;
+        }
+        .cell-actions {
+            position: absolute;
+            top: 50%;
+            right: 8px;
+            transform: translateY(-50%);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .dropdown-trigger {
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 4px;
+        }
+        .dropdown-trigger:focus {
+            outline: 2px solid #2563eb;
+        }
+        .dropdown-trigger[aria-expanded="true"] {
+            background: rgba(37,99,235,0.12);
+        }
+        .shift-dropdown {
+            position: fixed;
+            min-width: 160px;
+            background: #fff;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            box-shadow: 0 10px 40px rgba(15,23,42,0.15);
+            padding: 4px 0;
+            z-index: 2000;
+        }
+        .shift-dropdown button {
+            width: 100%;
+            border: none;
+            background: transparent;
+            text-align: left;
+            padding: 8px 12px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .shift-dropdown button:hover,
+        .shift-dropdown button:focus {
+            background: rgba(37,99,235,0.12);
+            outline: none;
+        }
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            min-width: 200px;
+            background: #111827;
+            color: #fff;
+            padding: 12px 16px;
+            border-radius: 8px;
+            box-shadow: 0 6px 30px rgba(17,24,39,0.2);
+            z-index: 4000;
+        }
+        .loading-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #60a5fa, #2563eb);
+            transition: width 0.3s ease;
+            z-index: 5000;
+        }
+    </style>
+</head>
+<body>
+<header>
+    <h1>协同排班系统（HTTPS + SSE 实时）</h1>
+</header>
+<div class="loading-bar" id="loading-bar"></div>
+<div class="container">
+    <div class="toolbar">
+        <label><span>团队</span>
+            <input type="text" id="team-input" value="版权组">
+        </label>
+        <label><span>日期</span>
+            <input type="date" id="day-input">
+        </label>
+        <button type="button" id="reload-btn">加载排班</button>
+        <button type="button" id="snapshot-btn">保存快照</button>
+    </div>
+    <table aria-label="排班表" id="schedule-table">
+        <thead>
+            <tr>
+                <th scope="col">成员</th>
+                <th scope="col">班次</th>
+            </tr>
+        </thead>
+        <tbody id="schedule-body">
+        </tbody>
+    </table>
+</div>
+<div id="toast-container" aria-live="polite" aria-atomic="true"></div>
+<script src="/public/js/app.js"></script>
+</body>
+</html>
