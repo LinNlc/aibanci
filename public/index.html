@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>排班协作平台</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/normalize.css@8.0.1/normalize.css" />
+  <style>
+    :root { font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif; background-color: #f5f7fb; color: #1f2937; }
+    body { margin: 0; padding: 0; min-height: 100vh; display: flex; flex-direction: column; }
+    header { background: linear-gradient(135deg, #6366f1, #0ea5e9); color: #fff; padding: 1.5rem 2rem; box-shadow: 0 10px 25px rgba(79,70,229,0.25); position: sticky; top: 0; z-index: 10; }
+    main { flex: 1; padding: 1.5rem 2rem 4rem; }
+    h1 { margin: 0 0 0.5rem; font-size: 1.75rem; }
+    .controls { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
+    label { display: flex; flex-direction: column; font-size: 0.9rem; gap: 0.35rem; color: rgba(255,255,255,0.85); }
+    input, select { font-size: 1rem; padding: 0.5rem 0.75rem; border-radius: 0.5rem; border: none; min-width: 180px; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.35); }
+    input:focus-visible, button:focus-visible { outline: 3px solid rgba(14,165,233,0.75); outline-offset: 2px; }
+    .grid-container { background: #fff; border-radius: 1.25rem; box-shadow: 0 20px 40px rgba(15,23,42,0.12); padding: 1.5rem; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; min-width: 600px; }
+    thead { background: #f3f4f6; }
+    th, td { border-bottom: 1px solid #e5e7eb; padding: 0.75rem 0.5rem; text-align: left; }
+    th { font-weight: 600; font-size: 0.95rem; }
+    tbody tr:hover { background: #f9fafb; }
+    .cell { position: relative; display: flex; align-items: center; }
+    .cell-value { flex: 1; padding: 0.5rem 0.75rem; border-radius: 0.75rem; border: 1px solid #cbd5f5; background: #f8fafc; font-size: 0.95rem; min-width: 6rem; }
+    .cell-value[readonly] { cursor: default; }
+    .cell-actions { margin-left: 0.5rem; position: relative; }
+    .dropdown-trigger { position: relative; border: none; background: #4f46e5; color: #fff; width: 1.8rem; height: 1.8rem; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 10px 20px rgba(79,70,229,0.25); }
+    .dropdown-trigger::before { content: ''; border: 0.35rem solid transparent; border-top-color: #fff; transform: translateY(2px); }
+    .dropdown-panel { position: fixed; z-index: 1000; background: #fff; border-radius: 0.75rem; box-shadow: 0 18px 45px rgba(15,23,42,0.18); padding: 0.35rem; min-width: 140px; max-height: 280px; overflow-y: auto; border: 1px solid rgba(148,163,184,0.25); }
+    .dropdown-option { width: 100%; border: none; background: transparent; text-align: left; padding: 0.65rem 0.75rem; border-radius: 0.6rem; font-size: 0.95rem; cursor: pointer; }
+    .dropdown-option:hover, .dropdown-option:focus { background: rgba(79,70,229,0.12); }
+    .dropdown-option[aria-selected="true"] { background: rgba(14,165,233,0.15); font-weight: 600; }
+    .toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: rgba(15,23,42,0.88); color: #fff; padding: 0.85rem 1.2rem; border-radius: 0.85rem; box-shadow: 0 20px 40px rgba(15,23,42,0.3); opacity: 0; transform: translateY(20px); transition: all 0.3s ease; z-index: 1200; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .status-bar { margin-top: 1rem; font-size: 0.85rem; color: #6b7280; display: flex; gap: 1rem; align-items: center; }
+    .lock-indicator { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.8rem; color: #ef4444; }
+    .progress { height: 4px; background: rgba(79,70,229,0.2); border-radius: 999px; overflow: hidden; margin-top: 1rem; }
+    .progress::after { content: ''; display: block; width: var(--progress,0%); height: 100%; background: linear-gradient(135deg,#4f46e5,#0ea5e9); transition: width 0.4s ease; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>排班协作平台</h1>
+    <div class="controls">
+      <label>
+        团队
+        <input id="teamInput" type="text" placeholder="请输入团队名称" />
+      </label>
+      <label>
+        日期
+        <input id="dayInput" type="date" />
+      </label>
+      <button id="reloadBtn" type="button" class="dropdown-trigger" aria-label="重新加载">
+        <span class="sr-only">重新加载</span>
+      </button>
+    </div>
+    <div class="progress" id="loadingBar"></div>
+  </header>
+  <main>
+    <section class="grid-container">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">成员</th>
+            <th scope="col">班次</th>
+            <th scope="col">最后更新</th>
+          </tr>
+        </thead>
+        <tbody id="scheduleBody"></tbody>
+      </table>
+    </section>
+    <div class="status-bar" id="statusBar"></div>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script>window.SHIFT_TYPES = ['白','中1','中2','夜','休'];</script>
+  <script src="js/app.js" type="module"></script>
+</body>
+</html>
