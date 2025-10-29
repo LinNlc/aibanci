@@ -8,11 +8,9 @@ CONFIG_TARGET="$ROOT_DIR/config/app.php"
 
 mkdir -p "$ROOT_DIR/data" "$ROOT_DIR/log" "$ROOT_DIR/snapshots"
 
-if [ ! -f "$DB_PATH" ]; then
-  sqlite3 "$DB_PATH" < "$SCHEMA"
-else
-  echo "数据库已存在：$DB_PATH" >&2
-fi
+sqlite3 "$DB_PATH" < "$SCHEMA"
+
+echo "数据库结构及默认数据已同步：$DB_PATH" >&2
 
 if [ ! -f "$CONFIG_TARGET" ]; then
   cp "$ROOT_DIR/config/app.example.php" "$CONFIG_TARGET"
