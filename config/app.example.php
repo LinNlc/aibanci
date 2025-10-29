@@ -2,10 +2,11 @@
 return [
     // SQLite 数据库文件路径，默认放置在项目 data 目录下
     'db_path' => __DIR__ . '/../data/schedule.db',
-    // 默认团队编码（用户首次登录时的默认视图）
-    'default_team_code' => 'default',
-    // 默认日期（按月视图）
-    'default_month' => (new DateTime('now', new DateTimeZone('Asia/Shanghai')))->format('Y-m'),
+    // 允许的班次列表，可按需扩展
+    'allowed_values' => ['白', '中1', '中2', '夜', '休'],
+    // 默认团队与页面展示范围
+    'default_team' => '默认团队',
+    'default_day' => (new DateTime('now', new DateTimeZone('Asia/Shanghai')))->format('Y-m-d'),
     // SSE 心跳间隔（秒）
     'sse_heartbeat' => 15,
     // 软锁持续时间（秒）
@@ -19,12 +20,4 @@ return [
     'snapshot_dir' => __DIR__ . '/../snapshots',
     // 日志目录
     'log_dir' => __DIR__ . '/../log',
-    // 会话配置
-    'session' => [
-        'name' => 'AIBANCISESSID',
-        'cookie_lifetime' => 604800,
-        'cookie_secure' => false,
-        'cookie_httponly' => true,
-        'cookie_samesite' => 'Lax',
-    ],
 ];
