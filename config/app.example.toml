@@ -1,0 +1,4 @@
+# 应用配置示例
+secret_key = "change-me"
+database_path = "data/app.db"
+session_max_age = 604800

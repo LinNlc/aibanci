@@ -3,78 +3,301 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>排班协作平台</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/normalize.css@8.0.1/normalize.css" />
+  <title>排班系统</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
-    :root { font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif; background-color: #f5f7fb; color: #1f2937; }
-    body { margin: 0; padding: 0; min-height: 100vh; display: flex; flex-direction: column; }
-    header { background: linear-gradient(135deg, #6366f1, #0ea5e9); color: #fff; padding: 1.5rem 2rem; box-shadow: 0 10px 25px rgba(79,70,229,0.25); position: sticky; top: 0; z-index: 10; }
-    main { flex: 1; padding: 1.5rem 2rem 4rem; }
-    h1 { margin: 0 0 0.5rem; font-size: 1.75rem; }
-    .controls { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
-    label { display: flex; flex-direction: column; font-size: 0.9rem; gap: 0.35rem; color: rgba(255,255,255,0.85); }
-    input, select { font-size: 1rem; padding: 0.5rem 0.75rem; border-radius: 0.5rem; border: none; min-width: 180px; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.35); }
-    input:focus-visible, button:focus-visible { outline: 3px solid rgba(14,165,233,0.75); outline-offset: 2px; }
-    .grid-container { background: #fff; border-radius: 1.25rem; box-shadow: 0 20px 40px rgba(15,23,42,0.12); padding: 1.5rem; overflow: hidden; }
-    table { width: 100%; border-collapse: collapse; min-width: 600px; }
-    thead { background: #f3f4f6; }
-    th, td { border-bottom: 1px solid #e5e7eb; padding: 0.75rem 0.5rem; text-align: left; }
-    th { font-weight: 600; font-size: 0.95rem; }
-    tbody tr:hover { background: #f9fafb; }
-    .cell { position: relative; display: flex; align-items: center; }
-    .cell-value { flex: 1; padding: 0.5rem 0.75rem; border-radius: 0.75rem; border: 1px solid #cbd5f5; background: #f8fafc; font-size: 0.95rem; min-width: 6rem; }
-    .cell-value[readonly] { cursor: default; }
-    .cell-actions { margin-left: 0.5rem; position: relative; }
-    .dropdown-trigger { position: relative; border: none; background: #4f46e5; color: #fff; width: 1.8rem; height: 1.8rem; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 10px 20px rgba(79,70,229,0.25); }
-    .dropdown-trigger::before { content: ''; border: 0.35rem solid transparent; border-top-color: #fff; transform: translateY(2px); }
-    .dropdown-panel { position: fixed; z-index: 1000; background: #fff; border-radius: 0.75rem; box-shadow: 0 18px 45px rgba(15,23,42,0.18); padding: 0.35rem; min-width: 140px; max-height: 280px; overflow-y: auto; border: 1px solid rgba(148,163,184,0.25); }
-    .dropdown-option { width: 100%; border: none; background: transparent; text-align: left; padding: 0.65rem 0.75rem; border-radius: 0.6rem; font-size: 0.95rem; cursor: pointer; }
-    .dropdown-option:hover, .dropdown-option:focus { background: rgba(79,70,229,0.12); }
-    .dropdown-option[aria-selected="true"] { background: rgba(14,165,233,0.15); font-weight: 600; }
-    .toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: rgba(15,23,42,0.88); color: #fff; padding: 0.85rem 1.2rem; border-radius: 0.85rem; box-shadow: 0 20px 40px rgba(15,23,42,0.3); opacity: 0; transform: translateY(20px); transition: all 0.3s ease; z-index: 1200; }
-    .toast.show { opacity: 1; transform: translateY(0); }
-    .status-bar { margin-top: 1rem; font-size: 0.85rem; color: #6b7280; display: flex; gap: 1rem; align-items: center; }
-    .lock-indicator { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.8rem; color: #ef4444; }
-    .progress { height: 4px; background: rgba(79,70,229,0.2); border-radius: 999px; overflow: hidden; margin-top: 1rem; }
-    .progress::after { content: ''; display: block; width: var(--progress,0%); height: 100%; background: linear-gradient(135deg,#4f46e5,#0ea5e9); transition: width 0.4s ease; }
-    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; white-space: nowrap; }
+    :root {
+      font-family: 'Inter', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+      color: #0f172a;
+      background-color: #f4f6fb;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #f4f6fb;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      width: 64px;
+      background: linear-gradient(180deg, #1d4ed8, #4338ca);
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1rem 0.75rem;
+      gap: 1rem;
+      position: relative;
+      transition: width 0.2s ease;
+      z-index: 20;
+    }
+
+    .sidebar:hover,
+    .sidebar.is-pinned {
+      width: 220px;
+    }
+
+    .sidebar .logo {
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+
+    .nav-item {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.65rem 0.75rem;
+      border-radius: 0.75rem;
+      color: inherit;
+      text-decoration: none;
+      font-weight: 500;
+      transition: background 0.2s ease;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .nav-item .icon {
+      font-size: 1.25rem;
+      width: 1.5rem;
+      text-align: center;
+    }
+
+    .nav-item.active {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .nav-item:hover {
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    .main-area {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    .topbar {
+      background: #fff;
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .topbar h1 {
+      font-size: 1.25rem;
+      margin: 0;
+      font-weight: 600;
+    }
+
+    .team-select {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    select,
+    input,
+    button {
+      font-family: inherit;
+    }
+
+    select,
+    input[type="month"],
+    input[type="text"],
+    input[type="color"],
+    input[type="number"] {
+      padding: 0.45rem 0.6rem;
+      border: 1px solid #cbd5f5;
+      border-radius: 0.6rem;
+      background: #fff;
+      font-size: 0.95rem;
+      min-width: 160px;
+    }
+
+    button {
+      border: none;
+      border-radius: 0.6rem;
+      background: #1d4ed8;
+      color: #fff;
+      font-size: 0.95rem;
+      padding: 0.5rem 0.9rem;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: transparent;
+      color: #1d4ed8;
+      border: 1px solid rgba(29, 78, 216, 0.4);
+    }
+
+    button[disabled] {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    .content {
+      flex: 1;
+      padding: 1.5rem;
+      overflow: auto;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 1rem;
+      padding: 1.5rem;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      border: 1px solid #e2e8f0;
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      font-size: 0.95rem;
+    }
+
+    thead th {
+      background: #f8fafc;
+      font-weight: 600;
+    }
+
+    .schedule-grid {
+      overflow-x: auto;
+    }
+
+    .schedule-cell {
+      min-width: 120px;
+      height: 48px;
+      border-radius: 0.65rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 0.15s ease;
+    }
+
+    .schedule-cell.readonly {
+      cursor: default;
+    }
+
+    .schedule-cell:not(.readonly):hover {
+      transform: scale(1.02);
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+    }
+
+    .dropdown-panel {
+      position: absolute;
+      z-index: 50;
+      background: #fff;
+      border-radius: 0.75rem;
+      box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2);
+      padding: 0.5rem;
+      min-width: 180px;
+      max-height: 260px;
+      overflow-y: auto;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .dropdown-panel button {
+      width: 100%;
+      background: transparent;
+      color: #0f172a;
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.5rem;
+      border: none;
+      text-align: left;
+    }
+
+    .dropdown-panel button:hover,
+    .dropdown-panel button:focus {
+      background: rgba(37, 99, 235, 0.12);
+      outline: none;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      padding: 0.15rem 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+
+    .login-wrapper {
+      max-width: 360px;
+      margin: 8rem auto;
+      background: #fff;
+      border-radius: 1rem;
+      padding: 2rem;
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.12);
+      display: none;
+    }
+
+    .login-wrapper.active {
+      display: block;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: rgba(15, 23, 42, 0.9);
+      color: #fff;
+      padding: 0.75rem 1rem;
+      border-radius: 0.75rem;
+      box-shadow: 0 12px 24px rgba(15, 23, 42, 0.25);
+      opacity: 0;
+      transform: translateY(20px);
+      transition: all 0.3s ease;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 2rem;
+      color: #64748b;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.8rem;
+      padding: 0.25rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(37, 99, 235, 0.12);
+      color: #1d4ed8;
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>排班协作平台</h1>
-    <div class="controls">
-      <label>
-        团队
-        <input id="teamInput" type="text" placeholder="请输入团队名称" />
-      </label>
-      <label>
-        日期
-        <input id="dayInput" type="date" />
-      </label>
-      <button id="reloadBtn" type="button" class="dropdown-trigger" aria-label="重新加载">
-        <span class="sr-only">重新加载</span>
-      </button>
-    </div>
-    <div class="progress" id="loadingBar"></div>
-  </header>
-  <main>
-    <section class="grid-container">
-      <table>
-        <thead>
-          <tr>
-            <th scope="col">成员</th>
-            <th scope="col">班次</th>
-            <th scope="col">最后更新</th>
-          </tr>
-        </thead>
-        <tbody id="scheduleBody"></tbody>
-      </table>
-    </section>
-    <div class="status-bar" id="statusBar"></div>
-  </main>
+  <div id="app"></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script>window.SHIFT_TYPES = ['白','中1','中2','夜','休'];</script>
-  <script src="js/app.js" type="module"></script>
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>
