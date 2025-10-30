@@ -1,0 +1,3 @@
+secret_key = "dev-secret-change-me"
+database_path = "data/app.db"
+session_max_age = 604800

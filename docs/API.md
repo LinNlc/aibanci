@@ -1,123 +1,157 @@
 # API 说明
 
-所有接口默认前缀为 `https://${DOMAIN}/api/`，除 GET 请求外均要求通过 Cookie / Header 完成鉴权（本仓库提供 `is_authenticated()` 桩函数，可按需接入 SSO）。返回值统一为 JSON，时间戳为秒级 Unix 时间。
+所有接口均通过 `https://{HOST}/api` 暴露，统一使用基于 Cookie 的会话。除登录与首次改密外，其余请求均需携带由后端设置的 `session_token` Cookie。返回格式默认为 JSON，若发生错误，`detail` 字段中会包含 `{"error": "xxx"}`。
 
-## 公共错误码
-| 字段 | 说明 |
-| ---- | ---- |
-| `missing_parameter` | 缺少必填字段 |
-| `invalid_parameter` | 参数校验失败（非法日期、空值等） |
-| `invalid_value` | 班次不在白名单内 |
-| `unauthenticated` | 未登录或权限不足 |
-| `rate_limited` | 写入频率超过配置上限 |
-| `conflict` | CAS 校验失败，需刷新后重试 |
-| `not_found` | 指定资源不存在 |
-| `internal_error` | 服务内部异常 |
+## 通用错误码
+| `error` | 说明 |
+| ------- | ---- |
+| `unauthenticated` | 未登录或会话失效 |
+| `forbidden` | 权限不足（页面或团队权限） |
+| `invalid_range` | 查询参数的日期范围非法 |
+| `invalid_shift` | 指定的班次不存在或被禁用 |
+| `duplicate_shift_code` | 班次代码重复 |
+| `duplicate_person` | 人员名称重复 |
+| `duplicate_username` | 账号用户名重复 |
+| `invalid_page` | 设置了未知的页面权限标识 |
+| `invalid_access_level` | 团队授权等级非法（非 `read`/`write`/`null`） |
+| `team_not_found` | 指定团队不存在 |
+| `not_found` | 资源不存在 |
 
-## 1. `update_cell.php`
-- **方法**：POST
-- **入参（JSON）**：
-  - `team` (string)
-  - `day` (YYYY-MM-DD)
-  - `emp` (string)
-  - `new_value` (string，需在白名单内)
-  - `base_version` (int，当前单元格版本)
-  - `op_id` (string，客户端生成的全局唯一 ID)
-- **成功返回**：
+## 认证与账号接口
+
+### `POST /auth/login`
+- 请求体：`{ "username": "admin", "password": "admin" }`
+- 成功返回：
   ```json
   {
-    "applied": true,
-    "value": "白",
-    "version": 8,
-    "updated_at": 1730000000,
-    "updated_by": "user_123"
+    "must_change_password": false,
+    "user": {
+      "id": 1,
+      "username": "admin",
+      "display_name": "超级管理员",
+      "must_change_password": false,
+      "pages": [{"page": "schedule", "can_view": true, "can_edit": true}, ...],
+      "teams": [{"team_id": 1, "team_name": "运营一组", "access_level": "write"}, ...]
+    }
   }
   ```
-- **冲突示例**：
+- 若返回 `{"must_change_password": true}`，前端需转入首次改密流程。
+
+### `POST /auth/first-login`
+- 请求体：`{ "username": "admin", "current_password": "admin", "new_password": "新密码" }`
+- 功能：管理员首次登录必须调用本接口设置新密码。
+- 返回体同 `login`，成功后会话自动建立。
+
+### `POST /auth/logout`
+- 清除 `session_token` Cookie，返回 `{ "success": true }`。
+
+### `GET /auth/me`
+- 返回当前用户信息，字段同 `login` 接口中的 `user`。
+
+## 团队与排班接口
+
+### `GET /teams`
+- 返回当前账号有权限的团队列表，包含 `id`、`name`、`code`、`description` 与 `access_level`。
+
+### `GET /schedule`
+- 参数：`team_id`、`start`、`end`（均为 `YYYY-MM-DD`）。
+- 权限：页面 `schedule` 可见 + 团队 `read`/`write`。
+- 返回：
   ```json
   {
-    "applied": false,
-    "reason": "conflict"
-  }
-  ```
-  收到 conflict 时应立即调用 `get_cell.php` 获取最新版本。
-- **示例命令**：
-  ```bash
-  curl -X POST "https://${DOMAIN}/api/update_cell.php" \
-       -H 'Content-Type: application/json' \
-       -d '{"team":"版权组","day":"2025-10-28","emp":"张三","new_value":"中1","base_version":7,"op_id":"client-uuid"}'
-  ```
-
-## 2. `get_cell.php`
-- **方法**：GET
-- **参数**：`team`、`day`、`emp`
-- **返回**：单元格当前值、版本与最新更新时间
-
-## 3. `get_schedule.php`
-- **方法**：GET
-- **参数**：`team`、`day`
-- **返回**：
-  ```json
-  {
-    "team": "版权组",
-    "day": "2025-10-28",
-    "cells": [
-      {"emp":"张三","value":"白","version":3,"updated_at":1730000000,"updated_by":"user_123"},
-      {"emp":"李四","value":"夜","version":6,"updated_at":1730000100,"updated_by":"user_789"}
+    "team": {"id": 1, "name": "运营一组", "code": "ops", "description": "...", "access_level": "write"},
+    "start": "2024-06-01",
+    "end": "2024-06-30",
+    "read_only": false,
+    "people": [{"id": 1, "name": "张三", "sort_index": 1, "active": true, "show_in_schedule": true}, ...],
+    "shifts": [{"id": 1, "code": "DAY", "display_name": "白班", "bg_color": "#facc15", ...} ...],
+    "days": [
+      {
+        "date": "2024-06-01",
+        "weekday": "周六",
+        "assignments": [
+          {"person_id": 1, "shift_code": "DAY"},
+          {"person_id": 2, "shift_code": "SWING"}
+        ]
+      }
     ]
   }
   ```
-  若某成员尚未排班，可在前端补全默认行。
 
-## 4. `sync_ops.php`
-- **方法**：GET
-- **参数**：`team`、`day`、`since_ts`（int，默认为 0）
-- **返回**：`ts > since_ts` 的增量操作按时间升序排列
+### `PUT /schedule/cell`
+- 请求体：`{ "team_id": 1, "person_id": 1, "day": "2024-06-01", "shift_code": "DAY" }`
+- 权限：页面 `schedule` 可编辑 + 团队 `write`。
+- 返回：`{"person_id":1,"day":"2024-06-01","shift_code":"DAY","updated_at":"2024-06-01T12:00:00","updated_by":1}`。
+- 若 `shift_code` 为空或 `null`，表示清空该单元格。
+
+### `GET /schedule/export`
+- 参数同 `GET /schedule`。
+- 返回当前范围的 CSV 文件（`text/csv`）。
+
+## 班次设置接口
+所有接口均要求页面 `settings` 权限；写操作还需团队 `write`。
+
+| 方法 | 路径 | 说明 |
+| ---- | ---- | ---- |
+| `GET` | `/teams/{team_id}/shifts` | 按排序返回团队班次列表（含启用状态） |
+| `POST` | `/teams/{team_id}/shifts` | 新增班次，字段：`code`、`display_name`、`bg_color`、`text_color`、`sort_order`、`is_active` |
+| `PUT` | `/teams/{team_id}/shifts/{shift_id}` | 更新班次单字段，允许部分字段提交 |
+| `DELETE` | `/teams/{team_id}/shifts/{shift_id}` | 删除班次（若已在排班表中使用，需手动清理） |
+
+## 人员管理接口
+要求页面 `people` 权限；写操作需团队 `write`。
+
+| 方法 | 路径 | 说明 |
+| ---- | ---- | ---- |
+| `GET` | `/teams/{team_id}/people` | 返回团队成员，按 `sort_index` 排序 |
+| `POST` | `/teams/{team_id}/people` | 创建人员，字段：`name`、`active`、`show_in_schedule`、`sort_index` |
+| `PUT` | `/teams/{team_id}/people/{person_id}` | 更新人员信息，可提交部分字段 |
+| `DELETE` | `/teams/{team_id}/people/{person_id}` | 删除人员 |
+
+## 权限矩阵接口
+要求页面 `permissions` 权限，写操作需可编辑。
+
+### `GET /permissions/overview`
+返回权限矩阵：
+```json
+{
+  "teams": [{"id":1,"name":"运营一组","code":"ops","description":"..."}],
+  "users": [
+    {
+      "id":1,
+      "username":"admin",
+      "display_name":"超级管理员",
+      "is_active":true,
+      "pages":[{"page":"schedule","can_view":true,"can_edit":true},...],
+      "teams":[{"team_id":1,"team_name":"运营一组","access_level":"write"}]
+    }
+  ]
+}
+```
+
+### `POST /permissions/users`
+- 创建新账号。
+- 请求体：`{ "username": "new_user", "display_name": "新同事", "password": "Passw0rd", "must_change_password": true }`
+- 返回：完整用户权限对象（默认无页面/团队授权）。
+
+### `PUT /permissions/users/{user_id}`
+- 用于修改账号显示名、重置密码与更新页面/团队权限。
+- 请求体示例：
   ```json
   {
-    "ops": [
-      {"op_id":"uuid","team":"版权组","day":"2025-10-28","emp":"张三","base_version":7,"new_value":"中1","user_id":"user_123","ts":1730000000}
+    "display_name": "排班观察员",
+    "pages": [
+      {"page": "schedule", "can_view": true, "can_edit": false},
+      {"page": "people", "can_view": true, "can_edit": false}
     ],
-    "since": 0
+    "teams": [
+      {"team_id": 2, "access_level": "read"}
+    ],
+    "new_password": "viewer456"
   }
   ```
-  前端应在 SSE 断线后调用一次以补齐遗漏事件。
+- 若 `access_level` 为 `null` 或不包含团队，将撤销对应团队授权；`can_edit=true` 时会强制 `can_view=true`。
 
-## 5. `lock.php`
-- **方法**：POST
-- **入参（JSON）**：`action`（`acquire` / `renew` / `release`）、`team`、`day`、`emp`
-- **返回示例**：
-  ```json
-  {
-    "locked": true,
-    "lock_until": 1730000030,
-    "locked_by": "user_123",
-    "risk": false
-  }
-  ```
-  当 `risk=true` 时表示可能存在他人占用，前端需提示用户谨慎操作。
-
-## 6. `sse.php`
-- **方法**：GET（长连接）
-- **参数**：`team`、`day`、`since_ts`
-- **返回**：SSE 流，`event: message` 携带 `cell.update` 数据
-  ```text
-  event: message
-  data: {"type":"cell.update","team":"版权组","day":"2025-10-28","emp":"张三","value":"中1","base_version":7,"by":"user_123","ts":1730000000}
-  ```
-  每隔 15 秒发送 `:ping` 保活。客户端需监听 `error` 事件并在重连前调用 `sync_ops.php` 补差。
-
-## 7. `snapshot.php`
-- **模式 A**：创建快照
-  - **请求**：`POST /snapshot.php?team=...&day=...&note=...`
-  - **返回**：`{ "snap_id": "snap_xxx", "created_at": 1730000000 }`
-- **模式 B**：恢复快照
-  - **请求**：`POST /snapshot.php?mode=restore&snap_id=...`
-  - **返回**：`{ "restored": true, "team": "版权组", "day": "2025-10-28" }`
-- **模式 C**：查询快照
-  - **请求**：`GET /snapshot.php?team=...&day=...`
-  - **返回**：快照列表（按创建时间倒序）
-
-## 8. 其他脚本
-- `bin/install.sh`：初始化数据库与配置文件
-- `bin/daily_snapshot.sh`：按日期批量生成快照，可在 1Panel 计划任务中调用
+## 其他
+- `GET /api/health` 返回 `{ "status": "ok" }`，用于存活检测。
+- 静态前端通过 `/public/*` 访问，根路径 `/` 会返回 `public/index.html`。

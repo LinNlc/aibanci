@@ -1,66 +1,75 @@
-# 排班协作平台 v0.1.0
+# 排班协作平台 v1.0.0
 
 ## 项目概览
-排班协作平台基于 OpenResty + PHP-FPM + SQLite 的轻量级栈实现，采用“HTTP 写入 + SSE 推送”方案 A，保障多用户同时排班时的无冲突、无异常与强实时体验。后端通过 CAS + 幂等操作日志控制写入，前端则以 EventSource 保持与服务器的实时联动，并提供软锁提示，确保每位成员的修改都可追踪、可回滚。
+排班协作平台是一个面向多团队的排班管理系统，提供从账号登录、团队权限分配、班次配置到排班表维护的全流程能力。本版本基于 **FastAPI + SQLite** 提供后端接口，前端采用原生 Web 技术实现单页体验，支持按照团队与页面维度的细粒度权限控制，并内置示例数据用于快速演示。
 
 ### 核心特性
-- **强一致写入**：`schedule_cells` 表使用版本号实现 CAS，结合 `op_id` 幂等去重，消除并发冲突。
-- **实时同步**：SSE 增量推送 `cell.update` 事件，断线重连会自动补齐缺失操作。
-- **软锁防踩踏**：`schedule_softlocks` 记录编辑占用情况，灰度提醒潜在冲突。
-- **每日快照**：`schedule_snapshots` 保留历史状态，支持一键恢复与定时任务。
-- **前端无跳动下拉**：修复班次下拉弹回顶部的问题，保障滚动位置稳定。
+- **首次登录改密**：系统预置 `admin/admin`，首次登录必须通过“首次设置密码”完成密码更新后才能进入平台。
+- **多维权限矩阵**：账号可针对排班表格、班次设置、人员管理、角色权限四个页面设置可见/可编辑；团队权限区分 `read`/`write` 影响可编辑性与数据可见性。
+- **全局团队上下文**：顶部团队选择器会在所有页面保持同步，所有数据请求均依据当前团队过滤。
+- **排班表格视图**：以月份为粒度展示日期 × 人员矩阵，单元格支持颜色标注与下拉修改，支持 CSV 导出。
+- **设置/人员/权限管理**：支持班次字典维护、人员启用与排序、账号权限矩阵编辑以及账号新增。
+- **一键初始化**：`bin/install.sh` 会创建虚拟环境、安装依赖并初始化 SQLite 数据库与演示数据。
 
-### 架构示意
-```mermaid
-graph TD
-  subgraph Browser
-    UI[排班表格]
-    SSE[EventSource]
-  end
-  subgraph Server
-    Nginx[Nginx / OpenResty]
-    PHP[PHP-FPM]
-  end
-  subgraph Data
-    SQLite[(SQLite\nschedule_*)]
-    Snapshots[快照目录]
-    Logs[日志目录]
-  end
-
-  UI -- HTTP POST/GET --> Nginx
-  SSE -- /api/sse --> Nginx
-  Nginx --> PHP
-  PHP --> SQLite
-  PHP --> Snapshots
-  PHP --> Logs
+### 目录结构
 ```
-
-## 目录结构
-```
-api/               # PHP 接口脚本（含公共库）
-config/            # 应用配置与 Nginx 片段
-public/            # 前端静态页面与脚本
-schema/            # SQLite 初始化脚本
-bin/               # 安装与快照脚本
+api/               # FastAPI 后端代码
+  cli.py           # 初始化/运维脚本
+  routers/         # 各业务模块路由
+config/            # 应用配置（Toml）
+public/            # 前端静态资源
+schema/            # SQLite 数据库建表脚本
+bin/               # 安装脚本
+requirements.txt   # Python 依赖列表
 docs/              # 项目文档
 ```
 
-## 快速开始（本地 / 1Panel 容器）
-1. **安装依赖**：确保容器内已有 PHP 8.x、SQLite3、OpenResty。
-2. **初始化数据库**：
+## 快速开始
+1. **安装依赖并初始化数据库**
    ```bash
    ./bin/install.sh
    ```
-   生成 `data/schedule.db` 与默认配置 `config/app.php`。
-3. **调整配置**：按照实际部署路径编辑 `config/app.php`，确认数据库、班次列表、日志/快照目录。
-4. **启动服务**：使用 OpenResty/Nginx 指向 `public/` 目录，PHP-FPM 负责解析 `/api/*.php`。
-5. **体验功能**：浏览器访问 `https://${DOMAIN}/public/index.html`（或站点根），使用页面顶部的团队、日期切换排班，感受 SSE 实时同步效果。
+   脚本会自动创建 `.venv`、安装依赖、复制 `config/app.example.toml` 并执行 `python -m api.cli init-db` 写入演示数据。
+
+2. **启动后端服务**
+   ```bash
+   source .venv/bin/activate
+   uvicorn api.main:app --reload
+   ```
+   启动后访问 `http://127.0.0.1:8000/` 即可加载前端页面，接口统一位于 `/api/*`。
+
+3. **首位管理员登录**
+   - 打开浏览器访问主页，使用账号 `admin` / `admin` 登录。
+   - 系统会提示进入首次改密流程，提交新密码后方可访问主界面。
+
+4. **演示账号**
+   | 账号 | 密码 | 权限说明 |
+   | ---- | ---- | -------- |
+   | `admin` | 首次登录需改密 | 拥有全部页面的可见+可编辑权限，所有团队 `write` 权限 |
+   | `planner` | `planner123` | 运营一组 `write`，可编辑排班/班次/人员 |
+   | `viewer` | `viewer123` | 客服组 `read`，仅可查看排班 |
+
+## 权限与页面说明
+- **排班表格**：`page=schedule`。需要 `write` 团队权限与页面编辑权限方可修改单元格，`read` 团队权限可查看与导出。
+- **设置**：`page=settings`。维护班次字典，可编辑权限 + 团队 `write` 才能修改，更新立即影响排班表渲染。
+- **人员管理**：`page=people`。控制是否在排班表中展示及排序；只读账号仅能查看。
+- **角色权限**：`page=permissions`。展示账号 × 页面 × 团队矩阵，可新增账号、批量调整权限。
+
+## CSV 导出
+排班页支持在右上角导出当前月份与当前团队的 CSV 文件，首行依次为“日期、星期、成员A、成员B...”，内容使用班次显示名。
 
 ## 运维提示
-- `log/ops.log` 记录所有成功操作的关键信息，建议配合日志采集体系。
-- `snapshots/` 存储快照 JSON，可通过 `/api/snapshot.php?mode=list` 查询。
-- 若需扩展班次，只需同时修改 `config/app.php` 与 `schema/init.sql` 中的检查约束。
-- 定期执行 `bin/daily_snapshot.sh` 以保存每日状态，详见部署文档的计划任务章节。
+- 配置文件位于 `config/app.toml`，可调整数据库路径、会话有效期与密钥。
+- SQLite 建表脚本位于 `schema/init.sql`，可用于手动校验数据结构。
+- 如需重置演示数据，可删除 `data/app.db` 后重新执行 `python -m api.cli init-db`。
 
-## 已知问题与修复
-- ✅ **已修复**：排班页单元格右侧下拉按钮会触发页面回到顶部。现统一改用 `button` 触发器、固定定位弹层，并加入键盘可达性与滚动保持策略，确保长表格滚动位置稳定。
+## 权限覆盖的 E2E 验证建议
+1. **管理员首次改密**：以 `admin/admin` 登录 → 跳转首次设置密码 → 设定新密码后进入系统。
+2. **页面可见性**：使用 `viewer` 登录，仅看到“排班表格”菜单，其余页面隐藏。
+3. **团队只读**：`viewer` 在客服组仅能浏览排班，单元格无编辑交互，仍可切换月份与导出 CSV。
+4. **团队可写 + 页面只读组合**：将某账号赋予 `schedule` 可见但不可编辑，同时拥有团队 `write`，进入排班页应显示禁用状态。
+5. **班次设置联动**：以 `planner` 修改运营一组的班次颜色或显示名，返回排班页观察颜色与文本即时变化。
+6. **人员展示控制**：在人员管理中勾选/取消 `show_in_schedule` 并调整 `sort_index`，回到排班页验证列显隐与顺序。
+7. **权限矩阵实时生效**：管理员在“角色权限”页修改 `viewer` 的团队授权为 `write`，刷新排班页可获得编辑按钮；恢复为 `read` 后编辑入口立即消失。
+
+更多接口细节请参考 [`docs/API.md`](API.md) 与 [`docs/SCHEMA.md`](SCHEMA.md)。
